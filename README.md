@@ -41,9 +41,13 @@ Cómo ejecutar el proyecto:
 (en una terminal de vs code)
 
 -Crear entorno virtual con python: -m venv venv
+
 -Activarlo con: venv\Scripts\activate
+
 -Instalar dependencias con: pip install -r requirements.txt
+
 -Ejecutar el servidor con: uvicorn app.main:app --reload
+
 -Acceder a la documentación interactiva en: http://127.0.0.1:8000/docs
 
 
