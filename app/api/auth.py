@@ -1,27 +1,42 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
 from app.schemas.user import LoginRequest, Token
 from app.services.user_service import authenticate_user
+from app.services.audit_service import log_login_success, log_login_failure
 from app.core.security import create_access_token
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
 
 @router.post("/login", response_model=Token)
-def login(data: LoginRequest, db: Session = Depends(get_db)):
-    user = authenticate_user(db, data.username, data.password)
-    if not user:
+def login(
+    data: LoginRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user, error = authenticate_user(db, data.email, data.password)
+    if error:
+        log_login_failure(db, reason=error, email=data.email, request=request)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Credenciales inválidas."
+            detail="Credenciales inválidas.",
         )
+
+    user.last_login = datetime.now(timezone.utc)
+    db.commit()
+
+    log_login_success(db, user_id=user.id, request=request)
+
+    role_names = [role.name for role in user.roles]
 
     access_token = create_access_token(
         data={
-            "sub": user.username,
-            "role": user.role
+            "sub": str(user.id),
+            "roles": role_names,
         }
     )
     return {"access_token": access_token, "token_type": "bearer"}
