@@ -1,20 +1,18 @@
 from fastapi import Depends, HTTPException, status
-from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
-from sqlalchemy.orm import Session
+from fastapi.security import OAuth2PasswordBearer
+from sqlalchemy.orm import Session, selectinload
 
-from app.db.session import get_db
 from app.core.security import decode_access_token
+from app.db.session import get_db
 from app.models.user import User
 
-security = HTTPBearer()
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="/auth/login")
 
 
 def get_current_user(
-    credentials: HTTPAuthorizationCredentials = Depends(security),
+    token: str = Depends(oauth2_scheme),
     db: Session = Depends(get_db),
 ) -> User:
-    token = credentials.credentials
-
     payload = decode_access_token(token)
 
     if not payload:
@@ -23,14 +21,30 @@ def get_current_user(
             detail="Token inválido o expirado.",
         )
 
-    username = payload.get("sub")
-    if not username:
+    sub = payload.get("sub")
+    if not sub:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Token inválido (sin subject).",
         )
 
-    user = db.query(User).filter(User.username == username).first()
+    try:
+        user_id = int(sub)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Token inválido (subject no numérico).",
+        )
+
+    user = (
+        db.query(User)
+        .options(
+            selectinload(User.roles),
+            selectinload(User.profile),
+        )
+        .filter(User.id == user_id)
+        .first()
+    )
 
     if not user:
         raise HTTPException(
@@ -45,19 +59,3 @@ def get_current_user(
         )
 
     return user
-
-
-def require_role(*roles: str):
-    def _checker(user: User = Depends(get_current_user)) -> User:
-        if user.role not in roles:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="No tienes permisos para acceder a este recurso.",
-            )
-        return user
-
-    return _checker
-
-
-require_admin = require_role("admin")
-require_user = require_role("user", "admin")
