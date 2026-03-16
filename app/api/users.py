@@ -1,37 +1,21 @@
+"""
+Módulo de usuarios. 
+
+"""
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
 from app.db.session import get_db
 from app.models.user import User
-from app.schemas.user import UserCreate, UserRead
-from app.services.user_service import create_user
+from app.schemas.user import UserMeRead
 from app.services.audit_service import log_action
+from app.permissions.utils import get_user_permissions
 
 router = APIRouter(prefix="/users", tags=["Users"])
 
 
-@router.post("/register", response_model=UserRead, status_code=201)
-def register_user(
-    user_in: UserCreate,
-    request: Request,
-    db: Session = Depends(get_db),
-):
-    user = create_user(db, user_in)
-    log_action(
-        db,
-        user_id=user.id,
-        resource="auth",
-        action="register",
-        method="POST",
-        path="/users/register",
-        status_code=201,
-        request=request,
-    )
-    return user
-
-
-@router.get("/me", response_model=UserRead)
+@router.get("/me", response_model=UserMeRead)
 def read_current_user(
     request: Request,
     current_user: User = Depends(get_current_user),
@@ -47,4 +31,13 @@ def read_current_user(
         status_code=200,
         request=request,
     )
-    return current_user
+    permissions = get_user_permissions(current_user)
+    return UserMeRead(
+        id=current_user.id,
+        email=current_user.email,
+        is_active=current_user.is_active,
+        is_verified=current_user.is_verified,
+        roles=current_user.roles,
+        profile=current_user.profile,
+        permissions=permissions,
+    )
