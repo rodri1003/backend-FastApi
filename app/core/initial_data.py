@@ -102,8 +102,6 @@ def _init_casbin_policies() -> None:
     Crea políticas iniciales de Casbin de forma idempotente
 
     - admin: acceso total a todos los recursos/acciones
-    - editor: read/update sobre products
-    - user: read sobre products
     """
     enforcer = get_enforcer()
 
@@ -111,15 +109,7 @@ def _init_casbin_policies() -> None:
     if not enforcer.has_policy("admin", "*", "*"):
         enforcer.add_policy("admin", "*", "*")
 
-    # editor -> read/update products
-    if not enforcer.has_policy("editor", "products", "read"):
-        enforcer.add_policy("editor", "products", "read")
-    if not enforcer.has_policy("editor", "products", "update"):
-        enforcer.add_policy("editor", "products", "update")
-
-    # user -> read products
-    if not enforcer.has_policy("user", "products", "read"):
-        enforcer.add_policy("user", "products", "read")
+   
 
     enforcer.save_policy()
 
