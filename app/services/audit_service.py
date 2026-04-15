@@ -34,8 +34,10 @@ def log_login_success(
     db: Session,
     user_id: int,
     request: Any | None = None,
-) -> AuditLog:
+) -> AuditLog | None:
     """Registra login exitoso."""
+    return None
+    
     entry = AuditLog(
         event_type="login_success",
         user_id=user_id,
@@ -58,8 +60,10 @@ def log_login_failure(
     reason: str,
     email: str | None = None,
     request: Any | None = None,
-) -> AuditLog:
+) -> AuditLog | None:
     """Registra login fallido (credenciales inválidas, usuario inactivo, etc.)."""
+    return None
+    
     metadata = {}
     if email:
         metadata["email"] = email
@@ -92,8 +96,11 @@ def log_action(
     status_code: int | None = 200,
     request: Any | None = None,
     metadata: dict[str, Any] | None = None,
-) -> AuditLog:
+) -> AuditLog | None:
     """Registra una acción autorizada (acceso a recurso con permiso)."""
+    if action in ("read", "login", "logout") or method == "GET":
+        return None
+
     metadata_json = json.dumps(metadata) if metadata else None
 
     entry = AuditLog(

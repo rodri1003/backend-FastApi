@@ -3,7 +3,7 @@ from fastapi import HTTPException, status
 
 from app.core.security import hash_password, verify_password
 from app.models.user import Role, User, UserProfile, UserRole
-from app.schemas.user import UserCreate, UserCreateAdmin, UserUpdateAdmin
+from app.schemas.user import UserCreate, UserCreateAdmin, UserUpdateAdmin, UserProfileUpdate
 
 
 def create_user(db: Session, user_in: UserCreate) -> User:
@@ -13,6 +13,14 @@ def create_user(db: Session, user_in: UserCreate) -> User:
             status_code=status.HTTP_409_CONFLICT,
             detail="Email ya existe.",
         )
+
+    if user_in.phone:
+        exists_phone = db.query(UserProfile).filter(UserProfile.phone == user_in.phone).first()
+        if exists_phone:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="El número de teléfono ya está registrado por otro usuario.",
+            )
 
     user = User(
         email=user_in.email,
@@ -30,11 +38,15 @@ def create_user(db: Session, user_in: UserCreate) -> User:
         phone=user_in.phone,
         avatar_url=user_in.avatar_url,
         date_of_birth=user_in.date_of_birth,
+        country=user_in.country,
+        department=user_in.department,
+        municipality=user_in.municipality,
+        address_complement=user_in.address_complement,
     )
     db.add(profile)
 
-    # Rol por defecto "user" (si existe; el seed lo crea al arrancar)
-    default_role = db.query(Role).filter(Role.name == "user").first()
+    # Rol por defecto "cliente" (si existe; el seed lo crea al arrancar)
+    default_role = db.query(Role).filter(Role.name == "cliente").first()
     if default_role is not None:
         user.roles.append(default_role)
 
@@ -64,6 +76,42 @@ def authenticate_user(db: Session, email: str, password: str) -> tuple[User | No
     return user, None
 
 
+def update_user_profile(db: Session, user_id: int, data: UserProfileUpdate) -> User:
+    user = db.query(User).options(selectinload(User.profile)).filter(User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Usuario no encontrado.")
+    
+    if user.profile:
+        update_data = data.model_dump(exclude_unset=True)
+        if "first_name" in update_data:
+            user.profile.first_name = update_data["first_name"]
+        if "last_name" in update_data:
+            user.profile.last_name = update_data["last_name"]
+        if "phone" in update_data:
+            phone_val = update_data["phone"]
+            if phone_val:
+                exists_phone = db.query(UserProfile).filter(UserProfile.phone == phone_val, UserProfile.user_id != user_id).first()
+                if exists_phone:
+                    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="El número de teléfono ya está registrado por otro usuario.")
+            user.profile.phone = phone_val
+        if "avatar_url" in update_data:
+            user.profile.avatar_url = update_data["avatar_url"]
+        if "date_of_birth" in update_data:
+            user.profile.date_of_birth = update_data["date_of_birth"]
+        if "country" in update_data:
+            user.profile.country = update_data["country"]
+        if "department" in update_data:
+            user.profile.department = update_data["department"]
+        if "municipality" in update_data:
+            user.profile.municipality = update_data["municipality"]
+        if "address_complement" in update_data:
+            user.profile.address_complement = update_data["address_complement"]
+    db.commit()
+    db.refresh(user)
+    return user
+
+
+
 def create_user_admin(db: Session, user_in: UserCreateAdmin) -> User:
     """Crea un usuario desde el panel admin, con rol asignado."""
     exists = db.query(User).filter(User.email == user_in.email).first()
@@ -72,6 +120,14 @@ def create_user_admin(db: Session, user_in: UserCreateAdmin) -> User:
             status_code=status.HTTP_409_CONFLICT,
             detail="El email ya existe.",
         )
+
+    if user_in.phone:
+        exists_phone = db.query(UserProfile).filter(UserProfile.phone == user_in.phone).first()
+        if exists_phone:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="El número de teléfono ya está registrado por otro usuario.",
+            )
 
     role = db.query(Role).filter(Role.id == user_in.role_id).first()
     if not role:
@@ -96,6 +152,10 @@ def create_user_admin(db: Session, user_in: UserCreateAdmin) -> User:
         phone=user_in.phone,
         avatar_url=user_in.avatar_url,
         date_of_birth=user_in.date_of_birth,
+        country=user_in.country,
+        department=user_in.department,
+        municipality=user_in.municipality,
+        address_complement=user_in.address_complement,
     )
     db.add(profile)
     user.roles.append(role)
@@ -145,10 +205,28 @@ def update_user_admin(
         user.roles.append(role)
 
     if user.profile:
-        if data.first_name is not None:
-            user.profile.first_name = data.first_name
-        if data.last_name is not None:
-            user.profile.last_name = data.last_name
+        update_data = data.model_dump(exclude_unset=True)
+        if "first_name" in update_data and update_data["first_name"] is not None:
+            user.profile.first_name = update_data["first_name"]
+        if "last_name" in update_data and update_data["last_name"] is not None:
+            user.profile.last_name = update_data["last_name"]
+        if "phone" in update_data:
+            phone_val = update_data["phone"]
+            if phone_val:
+                exists_phone = db.query(UserProfile).filter(UserProfile.phone == phone_val, UserProfile.user_id != user_id).first()
+                if exists_phone:
+                    raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="El número de teléfono ya está registrado por otro usuario.")
+            user.profile.phone = phone_val
+        if "date_of_birth" in update_data:
+            user.profile.date_of_birth = update_data["date_of_birth"]
+        if "country" in update_data:
+            user.profile.country = update_data["country"]
+        if "department" in update_data:
+            user.profile.department = update_data["department"]
+        if "municipality" in update_data:
+            user.profile.municipality = update_data["municipality"]
+        if "address_complement" in update_data:
+            user.profile.address_complement = update_data["address_complement"]
 
     db.commit()
     db.refresh(user)

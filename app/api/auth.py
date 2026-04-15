@@ -4,8 +4,8 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.orm import Session
 
 from app.db.session import get_db
-from app.schemas.user import LoginRequest, Token
-from app.services.user_service import authenticate_user
+from app.schemas.user import LoginRequest, Token, UserCreate, UserRead
+from app.services.user_service import authenticate_user, create_user
 from app.services.audit_service import log_login_success, log_login_failure
 from app.core.security import create_access_token
 
@@ -40,3 +40,14 @@ def login(
         }
     )
     return {"access_token": access_token, "token_type": "bearer"}
+
+
+@router.post("/register", response_model=UserRead, status_code=201)
+def register(
+    data: UserCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+):
+    user = create_user(db, data)
+    return user
+

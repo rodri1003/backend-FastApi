@@ -9,6 +9,10 @@ from sqlalchemy import engine_from_config, pool
 from app.db.session import Base, DATABASE_URL
 from app.models import audit as audit_models
 from app.models import user as user_models
+from app.models import room as room_models
+from app.models import reservation as reservation_models
+from app.models import payment as payment_models
+from app.models import room_type as room_type_models
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
