@@ -1,0 +1,87 @@
+from datetime import date
+from decimal import Decimal
+from pydantic import BaseModel, Field
+
+class RoomTypeBase(BaseModel):
+    name: str
+    description: str | None = None
+
+class RoomTypeCreate(RoomTypeBase):
+    pass
+
+class RoomTypeRead(RoomTypeBase):
+    id: int
+
+    class Config:
+        from_attributes = True
+
+class RoomAmenityRead(BaseModel):
+    id: int
+    name: str
+
+    class Config:
+        from_attributes = True
+
+class RoomImageRead(BaseModel):
+    id: int
+    url: str
+
+    class Config:
+        from_attributes = True
+
+class SeasonPriceBase(BaseModel):
+    start_date: date
+    end_date: date
+    price_multiplier: Decimal
+    description: str | None = None
+
+class SeasonPriceCreate(SeasonPriceBase):
+    pass
+
+class SeasonPriceRead(SeasonPriceBase):
+    id: int
+
+    class Config:
+        from_attributes = True
+
+class RoomBase(BaseModel):
+    number: str
+    type: str
+    capacity: int
+    base_price: Decimal
+    description: str | None = None
+    is_active: bool = True
+
+class RoomCreate(RoomBase):
+    season_prices: list[SeasonPriceCreate] = []
+    images: list[str] = []
+
+class RoomUpdate(BaseModel):
+    number: str | None = None
+    type: str | None = None
+    capacity: int | None = None
+    base_price: Decimal | None = None
+    description: str | None = None
+    is_active: bool | None = None
+    season_prices: list[SeasonPriceCreate] | None = None
+    images: list[str] | None = None
+
+class RoomRead(RoomBase):
+    id: int
+    number: str
+    type: str
+    capacity: int
+    base_price: Decimal
+    description: str | None = None
+    is_active: bool
+    amenities: list[RoomAmenityRead] = []
+    images: list[RoomImageRead] = []
+    season_prices: list[SeasonPriceRead] = []
+
+    class Config:
+        from_attributes = True
+
+class RoomSearchResponse(BaseModel):
+    room: RoomRead
+    total_price: Decimal | None = None
+    is_available: bool = True

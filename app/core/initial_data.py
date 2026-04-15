@@ -2,7 +2,7 @@ from sqlalchemy.orm import Session
 
 from app.core.security import hash_password
 from app.db.session import SessionLocal
-from app.models.user import Role, User, UserProfile, UserRole
+from app.models.user import Role, User, UserProfile, UserRole, PermissionResource
 from app.permissions.casbin_enforcer import get_enforcer
 
 
@@ -33,7 +33,7 @@ def init_rbac_data() -> None:
         )
         user_role = _get_or_create_role(
             db,
-            name="user",
+            name="cliente",
             description="Usuario estándar",
         )
 
@@ -77,6 +77,12 @@ def init_rbac_data() -> None:
                     role_id=admin_role.id,
                 )
             )
+
+        # Inicializar recursos de permisos estándar
+        resources = ["users", "rooms", "reservations", "roles", "permissions", "audit_logs", "payments"]
+        for res_name in resources:
+            if not db.query(PermissionResource).filter(PermissionResource.name == res_name).first():
+                db.add(PermissionResource(name=res_name))
 
         db.commit()
 

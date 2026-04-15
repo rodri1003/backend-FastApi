@@ -62,6 +62,12 @@ class UserProfile(Base):
     phone = Column(String(50), nullable=True)
     avatar_url = Column(String(255), nullable=True)
     date_of_birth = Column(Date, nullable=True)
+    
+    country = Column(String(100), nullable=True)
+    department = Column(String(100), nullable=True)
+    municipality = Column(String(100), nullable=True)
+    address_complement = Column(String(255), nullable=True)
+    
     created_at = Column(
         DateTime(timezone=True),
         nullable=False,
@@ -117,3 +123,10 @@ class CasbinRule(Base):
     v3 = Column(String(255), nullable=True)
     v4 = Column(String(255), nullable=True)
     v5 = Column(String(255), nullable=True)
+
+
+class PermissionResource(Base):
+    __tablename__ = "permission_resources"
+
+    id = Column(Integer, primary_key=True, index=True)
+    name = Column(String(100), unique=True, nullable=False, index=True)

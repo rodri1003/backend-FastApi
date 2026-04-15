@@ -7,7 +7,7 @@ from app.models.user import User
 from app.permissions.casbin_enforcer import get_enforcer
 
 # Recursos y acciones para el frontend (visibilidad de menús y botones)
-RESOURCES = ["users", "roles", "permissions", "audit_logs", "admin"]
+RESOURCES = ["users", "roles", "permissions", "audit_logs", "rooms", "reservations", "payments", "dashboard"]
 ACTIONS = ["read", "create", "update", "delete"]
 
 
