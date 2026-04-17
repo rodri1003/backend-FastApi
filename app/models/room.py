@@ -18,6 +18,7 @@ class Room(Base):
     amenities = relationship("RoomAmenity", back_populates="room", cascade="all, delete-orphan")
     images = relationship("RoomImage", back_populates="room", cascade="all, delete-orphan")
     season_prices = relationship("SeasonPrice", back_populates="room", cascade="all, delete-orphan")
+    base_price_history = relationship("RoomBasePriceHistory", back_populates="room", cascade="all, delete-orphan")
     room_type = relationship("RoomType", lazy="joined")
 
     @property
@@ -55,5 +56,20 @@ class SeasonPrice(Base):
     end_date = Column(Date, nullable=False)
     price_multiplier = Column(Numeric(5, 2), nullable=False)
     description = Column(String(255), nullable=True)
+    
+    # Historic Pricing Auditing Fields
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    is_archived = Column(Boolean, default=False, nullable=False)
+    snapshot_base_price = Column(Numeric(10, 2), nullable=True)
 
     room = relationship("Room", back_populates="season_prices")
+
+class RoomBasePriceHistory(Base):
+    __tablename__ = "room_baseprice_history"
+
+    id = Column(Integer, primary_key=True, index=True, autoincrement=True)
+    room_id = Column(Integer, ForeignKey("rooms.id", ondelete="CASCADE"), nullable=False)
+    base_price = Column(Numeric(10, 2), nullable=False)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    room = relationship("Room", back_populates="base_price_history")

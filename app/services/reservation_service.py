@@ -13,7 +13,7 @@ def calculate_price(room: Room, check_in: date, check_out: date) -> Decimal:
     while current_date < check_out:
         multiplier = Decimal("1.0")
         for sp in room.season_prices:
-            if sp.start_date <= current_date <= sp.end_date:
+            if not getattr(sp, "is_archived", False) and sp.start_date <= current_date <= sp.end_date:
                 multiplier = sp.price_multiplier
                 break
         total += room.base_price * multiplier

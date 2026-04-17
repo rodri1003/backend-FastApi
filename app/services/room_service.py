@@ -2,7 +2,7 @@ import cloudinary
 import cloudinary.uploader
 from fastapi import UploadFile, HTTPException
 from sqlalchemy.orm import Session
-from app.models.room import Room, RoomImage, SeasonPrice
+from app.models.room import Room, RoomImage, SeasonPrice, RoomBasePriceHistory
 from app.models.room_type import RoomType
 from app.schemas.room import RoomCreate, RoomUpdate
 
@@ -22,11 +22,11 @@ def create_room(db: Session, data: RoomCreate) -> Room:
     room = Room(**room_data, room_type_id=room_type.id)
     
     for sp_data in data.season_prices:
-        room.season_prices.append(SeasonPrice(**sp_data.model_dump()))
+        room.season_prices.append(SeasonPrice(**sp_data.model_dump(), snapshot_base_price=room.base_price))
         
     for img_url in data.images:
         room.images.append(RoomImage(url=img_url))
-        
+    room.base_price_history.append(RoomBasePriceHistory(base_price=room.base_price))
     db.add(room)
     try:
         db.commit()
@@ -47,15 +47,59 @@ def update_room(db: Session, room: Room, data: RoomUpdate) -> Room:
             raise HTTPException(status_code=400, detail=f"El tipo '{data.type}' no existe o fue eliminado.")
         update_data["room_type_id"] = rt.id
 
+    old_base_price = room.base_price
+
     for key, value in update_data.items():
         setattr(room, key, value)
         
+    if room.base_price != old_base_price:
+        db.add(RoomBasePriceHistory(room_id=room.id, base_price=room.base_price))
+        
     if data.season_prices is not None:
-        db.query(SeasonPrice).filter(SeasonPrice.room_id == room.id).delete()
+        existing_sps = db.query(SeasonPrice).filter(SeasonPrice.room_id == room.id, SeasonPrice.is_archived == False).all()
+        existing_sp_dict = {sp.id: sp for sp in existing_sps}
+        
+        incoming_ids = [sp.id for sp in data.season_prices if getattr(sp, "id", None) is not None]
+        
+        # 1. Archive removed ones
+        for sp in existing_sps:
+            if sp.id not in incoming_ids:
+                sp.is_archived = True
+
+        # 2. Process incoming ones
         for sp_data in data.season_prices:
-            new_sp = SeasonPrice(**sp_data.model_dump())
-            new_sp.room_id = room.id
-            db.add(new_sp)
+            if getattr(sp_data, "id", None) is not None and sp_data.id in existing_sp_dict:
+                existing_sp = existing_sp_dict[sp_data.id]
+                # Modificado?
+                if (existing_sp.start_date != sp_data.start_date or
+                    existing_sp.end_date != sp_data.end_date or
+                    existing_sp.price_multiplier != sp_data.price_multiplier):
+                    
+                    # Archivar viejo y crear nuevo con nuevo snapshot
+                    existing_sp.is_archived = True
+                    new_sp = SeasonPrice(
+                        room_id=room.id,
+                        start_date=sp_data.start_date,
+                        end_date=sp_data.end_date,
+                        price_multiplier=sp_data.price_multiplier,
+                        description=sp_data.description,
+                        snapshot_base_price=room.base_price
+                    )
+                    db.add(new_sp)
+                else:
+                    # Sólo actualizar descripción si es que cambió
+                    existing_sp.description = sp_data.description
+            else:
+                # Nuevo
+                new_sp = SeasonPrice(
+                    room_id=room.id,
+                    start_date=sp_data.start_date,
+                    end_date=sp_data.end_date,
+                    price_multiplier=sp_data.price_multiplier,
+                    description=sp_data.description,
+                    snapshot_base_price=room.base_price
+                )
+                db.add(new_sp)
             
     if data.images is not None:
         db.query(RoomImage).filter(RoomImage.room_id == room.id).delete()
