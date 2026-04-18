@@ -51,14 +51,17 @@ def get_dashboard_stats(db: Session = Depends(get_db)):
 @router.get("/reservations", response_model=list[ReservationRead], dependencies=[Depends(require_permission("reservations", "read"))])
 def list_all_reservations(
     db: Session = Depends(get_db),
+    room_id: int | None = Query(default=None),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ):
+    query = db.query(Reservation).options(selectinload(Reservation.room)).filter(Reservation.is_deleted == False)
+    
+    if room_id:
+        query = query.filter(Reservation.room_id == room_id)
+        
     reservations = (
-        db.query(Reservation)
-        .options(selectinload(Reservation.room))
-        .filter(Reservation.is_deleted == False)
-        .order_by(Reservation.created_at.desc())
+        query.order_by(Reservation.created_at.desc())
         .offset(offset)
         .limit(limit)
         .all()

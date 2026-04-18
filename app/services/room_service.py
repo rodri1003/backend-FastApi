@@ -26,6 +26,11 @@ def create_room(db: Session, data: RoomCreate) -> Room:
         
     for img_url in data.images:
         room.images.append(RoomImage(url=img_url))
+    
+    # Auto-asignar portada si no se especificó una
+    if not room.cover_image_url and data.images:
+        room.cover_image_url = data.images[0]
+        
     room.base_price_history.append(RoomBasePriceHistory(base_price=room.base_price))
     db.add(room)
     try:
@@ -106,6 +111,17 @@ def update_room(db: Session, room: Room, data: RoomUpdate) -> Room:
         for img_url in data.images:
             new_img = RoomImage(url=img_url, room_id=room.id)
             db.add(new_img)
+        
+        # Si se actualizaron imágenes y no hay portada (o la que había se eliminó), auto-asignar la primera
+        if not room.cover_image_url and data.images:
+            room.cover_image_url = data.images[0]
+        elif room.cover_image_url and room.cover_image_url not in data.images:
+            # Si la portada actual ya no está en la lista de imágenes,
+            # pero hay otras disponibles, tomar la primera.
+            if data.images:
+                room.cover_image_url = data.images[0]
+            else:
+                room.cover_image_url = None
         
     try:
         db.commit()

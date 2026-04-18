@@ -69,6 +69,7 @@ class RoomBase(BaseModel):
     capacity: int
     base_price: Decimal
     description: str | None = None
+    cover_image_url: str | None = None
     is_active: bool = True
 
 class RoomCreate(RoomBase):
@@ -81,6 +82,7 @@ class RoomUpdate(BaseModel):
     capacity: int | None = None
     base_price: Decimal | None = None
     description: str | None = None
+    cover_image_url: str | None = None
     is_active: bool | None = None
     season_prices: list[SeasonPriceUpdate] | None = None
     images: list[str] | None = None

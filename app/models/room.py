@@ -12,6 +12,7 @@ class Room(Base):
     capacity = Column(Integer, nullable=False)
     base_price = Column(Numeric(10, 2), nullable=False)
     description = Column(Text, nullable=True)
+    cover_image_url = Column(String(500), nullable=True)
     is_active = Column(Boolean, default=True, nullable=False)
     is_deleted = Column(Boolean, default=False, nullable=False)
 
