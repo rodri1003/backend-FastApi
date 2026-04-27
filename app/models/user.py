@@ -67,6 +67,16 @@ class UserProfile(Base):
     department = Column(String(100), nullable=True)
     municipality = Column(String(100), nullable=True)
     address_complement = Column(String(255), nullable=True)
+
+    # DTE / Fiscal Fields (El Salvador) / Identity
+    person_type = Column(String(20), nullable=True)  # Natural, Juridica
+    document_type = Column(String(50), nullable=True) # DUI, Pasaporte, Carnet de Residente
+    document_number = Column(String(50), nullable=True) # Document number corresponding to type
+    nrc = Column(String(50), nullable=True)          # Número de Registro de Contribuyente
+
+    nit = Column(String(20), nullable=True)          # Número de Identificación Tributaria
+    economic_activity = Column(String(255), nullable=True) # Actividad Económica
+    taxpayer_type = Column(String(50), nullable=True) # Gran Contribuyente, Otros, etc.
     
     created_at = Column(
         DateTime(timezone=True),

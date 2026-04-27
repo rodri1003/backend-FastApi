@@ -42,6 +42,13 @@ def create_user(db: Session, user_in: UserCreate) -> User:
         department=user_in.department,
         municipality=user_in.municipality,
         address_complement=user_in.address_complement,
+        person_type=user_in.person_type,
+        nrc=user_in.nrc,
+        document_type=user_in.document_type,
+        document_number=user_in.document_number,
+        nit=user_in.nit,
+        economic_activity=user_in.economic_activity,
+        taxpayer_type=user_in.taxpayer_type,
     )
     db.add(profile)
 
@@ -106,6 +113,20 @@ def update_user_profile(db: Session, user_id: int, data: UserProfileUpdate) -> U
             user.profile.municipality = update_data["municipality"]
         if "address_complement" in update_data:
             user.profile.address_complement = update_data["address_complement"]
+        if "person_type" in update_data:
+            user.profile.person_type = update_data["person_type"]
+        if "nrc" in update_data:
+            user.profile.nrc = update_data["nrc"]
+        if "document_type" in update_data:
+            user.profile.document_type = update_data["document_type"]
+        if "document_number" in update_data:
+            user.profile.document_number = update_data["document_number"]
+        if "nit" in update_data:
+            user.profile.nit = update_data["nit"]
+        if "economic_activity" in update_data:
+            user.profile.economic_activity = update_data["economic_activity"]
+        if "taxpayer_type" in update_data:
+            user.profile.taxpayer_type = update_data["taxpayer_type"]
     db.commit()
     db.refresh(user)
     return user
@@ -156,6 +177,13 @@ def create_user_admin(db: Session, user_in: UserCreateAdmin) -> User:
         department=user_in.department,
         municipality=user_in.municipality,
         address_complement=user_in.address_complement,
+        person_type=user_in.person_type,
+        nrc=user_in.nrc,
+        document_type=user_in.document_type,
+        document_number=user_in.document_number,
+        nit=user_in.nit,
+        economic_activity=user_in.economic_activity,
+        taxpayer_type=user_in.taxpayer_type,
     )
     db.add(profile)
     user.roles.append(role)
@@ -227,7 +255,20 @@ def update_user_admin(
             user.profile.municipality = update_data["municipality"]
         if "address_complement" in update_data:
             user.profile.address_complement = update_data["address_complement"]
-
+        if "person_type" in update_data:
+            user.profile.person_type = update_data["person_type"]
+        if "nrc" in update_data:
+            user.profile.nrc = update_data["nrc"]
+        if "document_type" in update_data:
+            user.profile.document_type = update_data["document_type"]
+        if "document_number" in update_data:
+            user.profile.document_number = update_data["document_number"]
+        if "nit" in update_data:
+            user.profile.nit = update_data["nit"]
+        if "economic_activity" in update_data:
+            user.profile.economic_activity = update_data["economic_activity"]
+        if "taxpayer_type" in update_data:
+            user.profile.taxpayer_type = update_data["taxpayer_type"]
     db.commit()
     db.refresh(user)
     return user

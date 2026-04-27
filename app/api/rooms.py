@@ -9,6 +9,7 @@ from sqlalchemy import or_, and_
 from app.permissions.deps import require_permission
 from app.db.session import get_db
 from app.models.room import Room, SeasonPrice, RoomImage, RoomBasePriceHistory
+from app.models.room_type import RoomType
 from app.models.reservation import Reservation
 from app.schemas.room import RoomRead, RoomSearchResponse, RoomCreate, RoomUpdate, RoomPriceHistoryResponse
 
@@ -36,7 +37,7 @@ def search_rooms(
     ).filter(Room.is_active == True, Room.is_deleted == False, Room.capacity >= guests)
     
     if room_type:
-        q = q.filter(Room.type == room_type)
+        q = q.join(RoomType).filter(RoomType.name == room_type)
         
     rooms = q.all()
 
@@ -77,6 +78,14 @@ def get_public_rooms(db: Session = Depends(get_db)):
     for r in rooms:
         r.season_prices = [sp for sp in r.season_prices if not sp.is_archived]
     return rooms
+
+@router.get("/types", response_model=List[str])
+def get_public_room_types(db: Session = Depends(get_db)):
+    # Obtener nombres de tipos de habitación registrados
+    types = db.query(RoomType.name).filter(
+        RoomType.is_deleted == False
+    ).all()
+    return [t[0] for t in types]
 
 @router.get("/{room_id}", response_model=RoomRead)
 def get_room(room_id: int, db: Session = Depends(get_db)):

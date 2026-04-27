@@ -2,11 +2,14 @@
 API administrativa: usuarios, roles, permisos (Casbin) y bitácora.
 Acceso mediante permisos granulares (users:read, roles:create, etc.).
 """
+import secrets
+import string
 from datetime import datetime
-from fastapi import APIRouter, Depends, HTTPException, Request, Query, UploadFile, File
+from fastapi import APIRouter, Depends, HTTPException, Request, Query, UploadFile, File, BackgroundTasks
 from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import get_current_user
+from app.core.mail import send_welcome_email
 from app.db.session import get_db
 from app.models.user import User, Role, UserRole
 from app.models.audit import AuditLog
@@ -14,7 +17,7 @@ from app.models.room import Room
 from app.models.reservation import Reservation
 from app.models.payment import Payment
 from app.models.room_type import RoomType
-from sqlalchemy import func
+from sqlalchemy import func, cast, Date
 from app.schemas.user import UserRead, UserCreateAdmin, UserUpdateAdmin, RoleRead, RoleCreate, RoleUpdate
 from app.schemas.reservation import ReservationRead, AdminReservationCreate, AdminReservationUpdate
 from app.schemas.payment import PaymentCreate, PaymentRead
@@ -26,6 +29,7 @@ from app.services.audit_service import log_action
 from app.permissions.casbin_enforcer import get_enforcer
 from app.services.reservation_service import create_admin_reservation, calculate_price
 from app.services.room_service import upload_image_to_cloudinary
+from app.utils.date_utils import get_el_salvador_now, get_el_salvador_today
 
 router = APIRouter(prefix="/admin", tags=["Admin"])
 
@@ -36,16 +40,129 @@ def admin_ping(current_user: User = Depends(get_current_user)):
 
 @router.get("/dashboard-stats", dependencies=[Depends(require_permission("admin", "read"))])
 def get_dashboard_stats(db: Session = Depends(get_db)):
+    from datetime import timedelta
+    now = get_el_salvador_now()
+    today = get_el_salvador_today()
+    thirty_days_ago = now - timedelta(days=30)
+    sixty_days_ago = now - timedelta(days=60)
+    next_week = today + timedelta(days=7)
+
+    # Helper for growth
+    def calc_growth(current, previous):
+        if previous == 0:
+            return 100 if current > 0 else 0
+        return round(((current - previous) / previous) * 100, 1)
+
+    # 1. Basic Totals & KPIs
     total_users = db.query(User).filter(User.is_active == True).count()
     total_rooms = db.query(Room).filter(Room.is_active == True, Room.is_deleted == False).count()
-    active_reservations = db.query(Reservation).filter(Reservation.status.in_(["pending", "confirmed"]), Reservation.is_deleted == False).count()
-    revenue = db.query(func.sum(Payment.amount)).filter(Payment.status == "completed").scalar() or 0
     
+    # 2. Revenue & Advanced Metrics (ADR, RevPAR)
+    rev_total = db.query(func.sum(Payment.amount)).filter(Payment.status == "completed").scalar() or 0
+    rev_last_30 = db.query(func.sum(Payment.amount)).filter(Payment.status == "completed", Payment.created_at >= thirty_days_ago).scalar() or 0
+    rev_prev_30 = db.query(func.sum(Payment.amount)).filter(Payment.status == "completed", Payment.created_at >= sixty_days_ago, Payment.created_at < thirty_days_ago).scalar() or 0
+    
+    # Count of occupied room-nights in last 30 days for ADR
+    occupied_nights_30 = db.query(Reservation).filter(
+        Reservation.status == "confirmed",
+        Reservation.is_deleted == False,
+        Reservation.check_in >= thirty_days_ago
+    ).count() or 1 # Avoid div by zero
+    
+    adr = float(rev_last_30) / occupied_nights_30
+    rev_par = float(rev_last_30) / (total_rooms * 30) if total_rooms > 0 else 0
+
+    # 3. Occupancy Distribution (Live)
+    occupied_room_ids = db.query(Reservation.room_id).filter(
+        Reservation.check_in <= today,
+        Reservation.check_out > today,
+        Reservation.status == "confirmed",
+        Reservation.is_deleted == False
+    ).all()
+    occupied_now = len(set(r[0] for r in occupied_room_ids))
+    
+    # 4. Operations (Next 7 Days)
+    arrivals_next_7 = db.query(Reservation).filter(Reservation.check_in >= today, Reservation.check_in <= next_week, Reservation.is_deleted == False).count()
+    departures_next_7 = db.query(Reservation).filter(Reservation.check_out >= today, Reservation.check_out <= next_week, Reservation.is_deleted == False).count()
+
+    # 5. Revenue Trend & Forecast
+    # Historical (30 days)
+    chart_data_raw = db.query(
+        cast(Payment.created_at, Date).label("day"),
+        func.sum(Payment.amount).label("total")
+    ).filter(
+        Payment.status == "completed",
+        Payment.created_at >= thirty_days_ago
+    ).group_by(
+        cast(Payment.created_at, Date)
+    ).all()
+    
+    revenue_map = {str(row.day): float(row.total) for row in chart_data_raw}
+    
+    # Forecast (Next 7 days based on pending/confirmed reservations)
+    forecast_raw = db.query(
+        Reservation.check_in.label("day"),
+        func.sum(Reservation.total_cost).label("total")
+    ).filter(
+        Reservation.status.in_(["pending", "confirmed"]),
+        Reservation.check_in >= today,
+        Reservation.check_in <= next_week,
+        Reservation.is_deleted == False
+    ).group_by(Reservation.check_in).all()
+    
+    forecast_map = {str(row.day): float(row.total) for row in forecast_raw}
+
+    full_trend = []
+    # Combine Historical
+    for i in range(29, -1, -1):
+        d = (today - timedelta(days=i))
+        d_str = d.isoformat()
+        full_trend.append({"date": d_str, "amount": revenue_map.get(d_str, 0.0), "type": "actual"})
+    
+    # Add Forecast
+    for i in range(1, 8):
+        d = (today + timedelta(days=i))
+        d_str = d.isoformat()
+        full_trend.append({"date": d_str, "amount": forecast_map.get(d_str, 0.0), "type": "forecast"})
+
+    # 6. Market Mix (Revenue by Room Type)
+    market_mix = db.query(
+        RoomType.name,
+        func.sum(Payment.amount).label("total")
+    ).join(Room, Room.room_type_id == RoomType.id)\
+     .join(Reservation, Reservation.room_id == Room.id)\
+     .join(Payment, Payment.reservation_id == Reservation.id)\
+     .filter(Payment.status == "completed")\
+     .group_by(RoomType.name).all()
+    
+    mix_data = [{"label": row.name, "value": float(row.total)} for row in market_mix]
+
     return {
-        "total_users": total_users,
-        "total_rooms": total_rooms,
-        "active_reservations": active_reservations,
-        "total_revenue": float(revenue)
+        "kpis": {
+            "revenue": {
+                "total": float(rev_total), 
+                "growth": calc_growth(float(rev_last_30), float(rev_prev_30)),
+                "adr": round(adr, 2),
+                "revpar": round(rev_par, 2)
+            },
+            "rooms": {
+                "total": total_rooms,
+                "occupied": occupied_now,
+                "available": max(0, total_rooms - occupied_now),
+                "arrivals_7d": arrivals_next_7,
+                "departures_7d": departures_next_7
+            },
+            "users": {
+                "total": total_users,
+                "growth": 0 # Simplified for now
+            },
+            "reservations": {
+                "total": db.query(Reservation).filter(Reservation.is_deleted == False).count(),
+                "growth": 0
+            }
+        },
+        "revenue_trend": full_trend,
+        "market_mix": mix_data
     }
 
 @router.get("/reservations", response_model=list[ReservationRead], dependencies=[Depends(require_permission("reservations", "read"))])
@@ -173,7 +290,7 @@ def pay_reservation_admin(
 
     receipt_data = {
         "company": "Hotel AFE",
-        "date": datetime.now().isoformat(),
+        "date": get_el_salvador_now().isoformat(),
         "customer": reservation.user.email if reservation.user else "Admin Processed",
         "receipt_type": data.receipt_type,
         "reservation_id": reservation.unique_id,
@@ -371,20 +488,60 @@ def list_users(
     )
     return users
 
+def _generate_random_password(length: int = 12) -> str:
+    alphabet = string.ascii_letters + string.digits + "!@#$%^&*()"
+    while True:
+        pwd = ''.join(secrets.choice(alphabet) for i in range(length))
+        if (any(c.islower() for c in pwd)
+            and any(c.isupper() for c in pwd)
+            and any(c.isdigit() for c in pwd)
+            and any(c in "!@#$%^&*()" for c in pwd)):
+            return pwd
 
 @router.post("/users", response_model=UserRead, status_code=201, dependencies=[Depends(require_permission("users", "create"))])
 def create_user(
     user_in: UserCreateAdmin,
     request: Request,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
+    # Generar contraseña si no se proporciona
+    password_to_send = user_in.password
+    if not password_to_send:
+        password_to_send = _generate_random_password()
+        user_in.password = password_to_send
+
     user = create_user_admin(db, user_in)
+    
+    # Enviar correo de bienvenida en segundo plano
+    background_tasks.add_task(
+        send_welcome_email, 
+        email=user.email, 
+        first_name=user.profile.first_name, 
+        password=password_to_send
+    )
     log_action(
         db, user_id=current_user.id, resource="users", action="create",
         method="POST", path="/admin/users", status_code=201, request=request,
         metadata={"created_user_id": user.id, "email": user.email},
     )
+    return user
+
+
+@router.get("/users/{user_id}", response_model=UserRead, dependencies=[Depends(require_permission("users", "read"))])
+def get_user(
+    user_id: int,
+    db: Session = Depends(get_db),
+):
+    user = (
+        db.query(User)
+        .options(selectinload(User.roles), selectinload(User.profile))
+        .filter(User.id == user_id, User.is_active == True)
+        .first()
+    )
+    if not user:
+        raise HTTPException(status_code=404, detail="Usuario no encontrado")
     return user
 
 
@@ -426,6 +583,131 @@ def deactivate_user(
         db, user_id=current_user.id, resource="users", action="deactivate",
         method="DELETE", path=f"/admin/users/{user_id}", status_code=204, request=request,
         metadata={"deactivated_user_id": user_id},
+    )
+    return None
+
+
+# ----- Clientes -----
+
+
+@router.get("/clients", response_model=list[UserRead], dependencies=[Depends(require_permission("customers", "read"))])
+def list_clients(
+    db: Session = Depends(get_db),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+):
+    # Filtrar solo usuarios con el rol "cliente"
+    clients = (
+        db.query(User)
+        .join(User.roles)
+        .options(selectinload(User.roles), selectinload(User.profile))
+        .filter(User.is_active == True, Role.name == "cliente")
+        .order_by(User.id.asc())
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    return clients
+
+
+@router.get("/clients/{client_id}", response_model=UserRead, dependencies=[Depends(require_permission("customers", "read"))])
+def get_client(
+    client_id: int,
+    db: Session = Depends(get_db),
+):
+    client = (
+        db.query(User)
+        .join(User.roles)
+        .options(selectinload(User.roles), selectinload(User.profile))
+        .filter(User.id == client_id, Role.name == "cliente")
+        .first()
+    )
+    if not client:
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+    return client
+
+
+@router.post("/clients", response_model=UserRead, status_code=201, dependencies=[Depends(require_permission("customers", "create"))])
+def create_client(
+    user_in: UserCreateAdmin,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    # Forzar el rol "cliente"
+    cliente_role = db.query(Role).filter(Role.name == "cliente").first()
+    if not cliente_role:
+        raise HTTPException(status_code=404, detail="Rol 'cliente' no encontrado")
+    
+    user_in.role_id = cliente_role.id
+    
+    # Generar contraseña si no se proporciona
+    password_to_send = user_in.password
+    if not password_to_send:
+        password_to_send = _generate_random_password()
+        user_in.password = password_to_send
+
+    user = create_user_admin(db, user_in)
+    
+    # Enviar correo de bienvenida
+    background_tasks.add_task(
+        send_welcome_email, 
+        email=user.email, 
+        first_name=user.profile.first_name, 
+        password=password_to_send
+    )
+
+    log_action(
+        db, user_id=current_user.id, resource="customers", action="create",
+        method="POST", path="/admin/clients", status_code=201, request=request,
+        metadata={"created_client_id": user.id, "email": user.email},
+    )
+    return user
+
+
+@router.patch("/clients/{client_id}", response_model=UserRead, dependencies=[Depends(require_permission("customers", "update"))])
+def update_client(
+    client_id: int,
+    data: UserUpdateAdmin,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    # Verificar que sea un cliente
+    user = db.query(User).join(User.roles).filter(User.id == client_id, Role.name == "cliente").first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+        
+    updated_client = update_user_admin(db, client_id, data, current_user_id=current_user.id)
+    
+    log_action(
+        db, user_id=current_user.id, resource="customers", action="update",
+        method="PATCH", path=f"/admin/clients/{client_id}", status_code=200, request=request,
+        metadata={"updated_client_id": client_id},
+    )
+    return updated_client
+
+
+@router.delete("/clients/{client_id}", status_code=204, dependencies=[Depends(require_permission("customers", "delete"))])
+def deactivate_client(
+    client_id: int,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    # Verificar que sea un cliente
+    user = db.query(User).join(User.roles).filter(User.id == client_id, Role.name == "cliente").first()
+    if not user:
+        raise HTTPException(status_code=404, detail="Cliente no encontrado")
+        
+    user.is_active = False
+    db.commit()
+    
+    log_action(
+        db, user_id=current_user.id, resource="customers", action="deactivate",
+        method="DELETE", path=f"/admin/clients/{client_id}", status_code=204, request=request,
+        metadata={"deactivated_client_id": client_id},
     )
     return None
 

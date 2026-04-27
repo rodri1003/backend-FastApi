@@ -5,6 +5,7 @@ from fastapi import HTTPException
 from app.models.room import Room
 from app.models.reservation import Reservation
 from app.schemas.reservation import AdminReservationCreate, AdminReservationUpdate
+from app.utils.date_utils import get_el_salvador_today
 
 def calculate_price(room: Room, check_in: date, check_out: date) -> Decimal:
     """Calcula el precio total aplicando los multiplicadores de temporada."""
@@ -41,7 +42,7 @@ def create_admin_reservation(db: Session, data: AdminReservationCreate):
     if data.check_in >= data.check_out:
         raise HTTPException(status_code=400, detail="El Check-out debe ser después del check-in")
         
-    if data.check_in < date.today():
+    if data.check_in < get_el_salvador_today():
         raise HTTPException(status_code=400, detail="No se pueden crear reservaciones en el pasado")
 
     room = db.query(Room).options(selectinload(Room.season_prices)).filter(Room.id == data.room_id).first()
@@ -77,7 +78,7 @@ def update_reservation(db: Session, reservation: Reservation, data: AdminReserva
     if new_check_in >= new_check_out:
         raise HTTPException(status_code=400, detail="Check-out must be after check-in")
 
-    if data.check_in and data.check_in != reservation.check_in and data.check_in < date.today():
+    if data.check_in and data.check_in != reservation.check_in and data.check_in < get_el_salvador_today():
         raise HTTPException(status_code=400, detail="No puedes mover el check-in a una fecha pasada")
 
     # If dates OR room changed, check overlap and recalculate cost
@@ -135,7 +136,7 @@ def cancel_reservation(db: Session, reservation: Reservation):
 
     reservation.status = "cancelled"
     # Business Logic: Penalización de cancelación (si falta < 2 días, cobramos un 20%)
-    days_until_checkin = (reservation.check_in - date.today()).days
+    days_until_checkin = (reservation.check_in - get_el_salvador_today()).days
     if days_until_checkin <= 2 and reservation.status == "confirmed":
         # logic for penalty if any
         pass
