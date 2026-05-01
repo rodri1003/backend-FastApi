@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from app.db.session import get_db
 from app.models.reservation import Reservation
 from app.models.payment import Payment
-from datetime import datetime
+from datetime import datetime, timezone
 import json
 import logging
 
@@ -114,7 +114,7 @@ async def wompi_webhook(request: Request, db: Session = Depends(get_db)):
         # Generar comprobante
         receipt_data = {
             "company": "Hotel AFE",
-            "date": datetime.now().isoformat(),
+            "date": datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
             "customer": res.user.email if getattr(res, "user", None) else "Online Gateway",
             "receipt_type": "Consumidor Final",
             "reservation_id": res.unique_id,

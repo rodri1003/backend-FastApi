@@ -6,10 +6,11 @@ from app.models.room import Room
 from app.models.reservation import Reservation
 from app.schemas.reservation import AdminReservationCreate, AdminReservationUpdate
 from app.utils.date_utils import get_el_salvador_today
+from app.core.config import settings
 
-def calculate_price(room: Room, check_in: date, check_out: date) -> Decimal:
-    """Calcula el precio total aplicando los multiplicadores de temporada."""
-    total = Decimal("0.0")
+def calculate_price(room: Room, check_in: date, check_out: date) -> dict:
+    """Calcula el precio total aplicando los multiplicadores de temporada e impuestos."""
+    subtotal = Decimal("0.0")
     current_date = check_in
     while current_date < check_out:
         multiplier = Decimal("1.0")
@@ -17,9 +18,19 @@ def calculate_price(room: Room, check_in: date, check_out: date) -> Decimal:
             if not getattr(sp, "is_archived", False) and sp.start_date <= current_date <= sp.end_date:
                 multiplier = sp.price_multiplier
                 break
-        total += room.base_price * multiplier
+        subtotal += room.base_price * multiplier
         current_date += timedelta(days=1)
-    return total
+    
+    tax_iva = subtotal * Decimal(str(settings.TAX_IVA))
+    tax_tourism = subtotal * Decimal(str(settings.TAX_TOURISM))
+    total = subtotal + tax_iva + tax_tourism
+    
+    return {
+        "subtotal": subtotal,
+        "tax_iva": tax_iva,
+        "tax_tourism": tax_tourism,
+        "total": total
+    }
 
 def validate_reservation_overlap(db: Session, room_id: int, check_in: date, check_out: date, exclude_res_id: int = None):
     """Verifica si hay reservaciones existentes que se crucen con las fechas dadas."""
@@ -54,7 +65,7 @@ def create_admin_reservation(db: Session, data: AdminReservationCreate):
 
     validate_reservation_overlap(db, data.room_id, data.check_in, data.check_out)
 
-    total_cost = calculate_price(room, data.check_in, data.check_out)
+    price_data = calculate_price(room, data.check_in, data.check_out)
 
     reservation = Reservation(
         user_id=data.user_id,
@@ -62,7 +73,10 @@ def create_admin_reservation(db: Session, data: AdminReservationCreate):
         check_in=data.check_in,
         check_out=data.check_out,
         guests=data.guests,
-        total_cost=total_cost,
+        subtotal=price_data["subtotal"],
+        tax_iva=price_data["tax_iva"],
+        tax_tourism=price_data["tax_tourism"],
+        total_cost=price_data["total"],
         status="pending"
     )
     db.add(reservation)
@@ -90,7 +104,11 @@ def update_reservation(db: Session, reservation: Reservation, data: AdminReserva
         if not room_full:
             raise HTTPException(status_code=404, detail="Nueva habitación no encontrada")
             
-        reservation.total_cost = calculate_price(room_full, new_check_in, new_check_out)
+        price_data = calculate_price(room_full, new_check_in, new_check_out)
+        reservation.subtotal = price_data["subtotal"]
+        reservation.tax_iva = price_data["tax_iva"]
+        reservation.tax_tourism = price_data["tax_tourism"]
+        reservation.total_cost = price_data["total"]
 
     if data.check_in: reservation.check_in = data.check_in
     if data.check_out: reservation.check_out = data.check_out

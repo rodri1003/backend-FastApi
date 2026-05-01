@@ -56,11 +56,14 @@ def search_rooms(
         if room.id in occupied_room_ids:
             continue
             
-        total = calculate_price(room, check_in, check_out)
+        price_data = calculate_price(room, check_in, check_out)
         results.append(
             RoomSearchResponse(
                 room=room,
-                total_price=total,
+                subtotal=price_data["subtotal"],
+                tax_iva=price_data["tax_iva"],
+                tax_tourism=price_data["tax_tourism"],
+                total_price=price_data["total"],
                 is_available=True
             )
         )

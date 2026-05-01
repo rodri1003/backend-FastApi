@@ -1,5 +1,5 @@
 import random
-from datetime import datetime
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session, selectinload
 
@@ -52,10 +52,12 @@ def process_payment(
         raise HTTPException(status_code=400, detail="El pago fue rechazado por el banco (Simulación). Intente de nuevo.")
 
     # Generar receipt data
+    profile = current_user.profile
     receipt_data = {
         "company": "Hotel AFE",
-        "date": datetime.now().isoformat(),
-        "customer": current_user.email,
+        "date": datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
+        "customer": f"{profile.first_name} {profile.last_name}" if profile else current_user.email,
+        "customer_email": current_user.email,
         "receipt_type": data.receipt_type,
         "reservation_id": reservation.unique_id,
         "room_number": reservation.room.number,
@@ -65,6 +67,14 @@ def process_payment(
         "amount_paid": str(data.amount),
         "method": data.method
     }
+
+    if data.receipt_type == "fiscal_credit" and profile:
+        receipt_data.update({
+            "nit": profile.nit,
+            "nrc": profile.nrc,
+            "business_name": profile.business_name or f"{profile.first_name} {profile.last_name}",
+            "economic_activity": profile.economic_activity
+        })
 
     payment = Payment(
         reservation_id=data.reservation_id,

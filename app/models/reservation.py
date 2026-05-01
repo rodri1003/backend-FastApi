@@ -1,5 +1,5 @@
 import uuid
-from sqlalchemy import Column, Integer, String, Numeric, Date, ForeignKey, func, DateTime, Boolean
+from sqlalchemy import Column, Integer, String, Numeric, Date, ForeignKey, func, DateTime, Boolean, text
 from sqlalchemy.orm import relationship
 
 from app.db.session import Base
@@ -14,11 +14,16 @@ class Reservation(Base):
     check_in = Column(Date, nullable=False)
     check_out = Column(Date, nullable=False)
     guests = Column(Integer, nullable=False)
+    
+    subtotal = Column(Numeric(10, 2), nullable=True)
+    tax_iva = Column(Numeric(10, 2), nullable=True)
+    tax_tourism = Column(Numeric(10, 2), nullable=True)
     total_cost = Column(Numeric(10, 2), nullable=False)
+    
     status = Column(String(50), nullable=False, default="pending")  # pending, confirmed, cancelled
     is_deleted = Column(Boolean, default=False, nullable=False)
-    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
-    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text('GETUTCDATE()'))
+    updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text('GETUTCDATE()'), onupdate=func.now())
 
     user = relationship("User", backref="reservations")
     room = relationship("Room", backref="reservations")

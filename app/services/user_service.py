@@ -43,6 +43,7 @@ def create_user(db: Session, user_in: UserCreate) -> User:
         municipality=user_in.municipality,
         address_complement=user_in.address_complement,
         person_type=user_in.person_type,
+        business_name=user_in.business_name,
         nrc=user_in.nrc,
         document_type=user_in.document_type,
         document_number=user_in.document_number,
@@ -115,6 +116,8 @@ def update_user_profile(db: Session, user_id: int, data: UserProfileUpdate) -> U
             user.profile.address_complement = update_data["address_complement"]
         if "person_type" in update_data:
             user.profile.person_type = update_data["person_type"]
+        if "business_name" in update_data:
+            user.profile.business_name = update_data["business_name"]
         if "nrc" in update_data:
             user.profile.nrc = update_data["nrc"]
         if "document_type" in update_data:
@@ -178,6 +181,7 @@ def create_user_admin(db: Session, user_in: UserCreateAdmin) -> User:
         municipality=user_in.municipality,
         address_complement=user_in.address_complement,
         person_type=user_in.person_type,
+        business_name=user_in.business_name,
         nrc=user_in.nrc,
         document_type=user_in.document_type,
         document_number=user_in.document_number,
@@ -257,6 +261,8 @@ def update_user_admin(
             user.profile.address_complement = update_data["address_complement"]
         if "person_type" in update_data:
             user.profile.person_type = update_data["person_type"]
+        if "business_name" in update_data:
+            user.profile.business_name = update_data["business_name"]
         if "nrc" in update_data:
             user.profile.nrc = update_data["nrc"]
         if "document_type" in update_data:

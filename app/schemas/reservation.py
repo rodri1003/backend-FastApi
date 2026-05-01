@@ -57,7 +57,12 @@ class ReservationRead(BaseModel):
     check_in: date
     check_out: date
     guests: int
+    
+    subtotal: Decimal | None = None
+    tax_iva: Decimal | None = None
+    tax_tourism: Decimal | None = None
     total_cost: Decimal
+    
     status: str
     created_at: datetime
     updated_at: datetime

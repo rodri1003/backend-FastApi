@@ -35,4 +35,8 @@ class Settings:
     MAIL_STARTTLS: bool = os.getenv("MAIL_STARTTLS", "True").lower() == "true"
     MAIL_SSL_TLS: bool = os.getenv("MAIL_SSL_TLS", "False").lower() == "true"
 
+    # Tax Settings
+    TAX_IVA: float = 0.13
+    TAX_TOURISM: float = 0.05
+
 settings = Settings()

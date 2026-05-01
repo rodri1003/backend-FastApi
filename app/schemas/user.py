@@ -39,6 +39,7 @@ class UserProfileBase(BaseModel):
     document_number: str | None = Field(default=None, max_length=50)
     nrc: str | None = Field(default=None, max_length=50)
     nit: str | None = Field(default=None, max_length=20)
+    business_name: str | None = Field(default=None, max_length=200)
     economic_activity: str | None = Field(default=None, max_length=255)
     taxpayer_type: str | None = Field(default=None, max_length=50)
 
@@ -58,6 +59,7 @@ class UserProfileUpdate(BaseModel):
     document_number: str | None = Field(default=None, max_length=50)
     nrc: str | None = Field(default=None, max_length=50)
     nit: str | None = Field(default=None, max_length=20)
+    business_name: str | None = Field(default=None, max_length=200)
     economic_activity: str | None = Field(default=None, max_length=255)
     taxpayer_type: str | None = Field(default=None, max_length=50)
 
@@ -186,6 +188,7 @@ class UserUpdateAdmin(BaseModel):
     document_number: str | None = Field(default=None, max_length=50)
     nrc: str | None = Field(default=None, max_length=50)
     nit: str | None = Field(default=None, max_length=20)
+    business_name: str | None = Field(default=None, max_length=200)
     economic_activity: str | None = Field(default=None, max_length=255)
     taxpayer_type: str | None = Field(default=None, max_length=50)
     

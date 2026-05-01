@@ -17,7 +17,7 @@ from app.models.room import Room
 from app.models.reservation import Reservation
 from app.models.payment import Payment
 from app.models.room_type import RoomType
-from sqlalchemy import func, cast, Date
+from sqlalchemy import func, cast, Date, text
 from app.schemas.user import UserRead, UserCreateAdmin, UserUpdateAdmin, RoleRead, RoleCreate, RoleUpdate
 from app.schemas.reservation import ReservationRead, AdminReservationCreate, AdminReservationUpdate
 from app.schemas.payment import PaymentCreate, PaymentRead
@@ -85,17 +85,20 @@ def get_dashboard_stats(db: Session = Depends(get_db)):
     arrivals_next_7 = db.query(Reservation).filter(Reservation.check_in >= today, Reservation.check_in <= next_week, Reservation.is_deleted == False).count()
     departures_next_7 = db.query(Reservation).filter(Reservation.check_out >= today, Reservation.check_out <= next_week, Reservation.is_deleted == False).count()
 
-    # 5. Revenue Trend & Forecast
-    # Historical (30 days)
-    chart_data_raw = db.query(
-        cast(Payment.created_at, Date).label("day"),
-        func.sum(Payment.amount).label("total")
+    # Historical (30 days) - Ajustado a zona horaria El Salvador (-6h)
+    # Usamos subquery para evitar errores de GROUP BY en SQL Server
+    sub = db.query(
+        cast(func.dateadd(text('hour'), -6, Payment.created_at), Date).label("day"),
+        Payment.amount
     ).filter(
         Payment.status == "completed",
         Payment.created_at >= thirty_days_ago
-    ).group_by(
-        cast(Payment.created_at, Date)
-    ).all()
+    ).subquery()
+
+    chart_data_raw = db.query(
+        sub.c.day,
+        func.sum(sub.c.amount).label("total")
+    ).group_by(sub.c.day).all()
     
     revenue_map = {str(row.day): float(row.total) for row in chart_data_raw}
     
@@ -288,10 +291,12 @@ def pay_reservation_admin(
     if Decimal(str(data.amount)) <= 0:
         raise HTTPException(status_code=400, detail="El monto del pago debe ser mayor a cero")
 
+    profile = reservation.user.profile if reservation.user else None
     receipt_data = {
         "company": "Hotel AFE",
         "date": get_el_salvador_now().isoformat(),
-        "customer": reservation.user.email if reservation.user else "Admin Processed",
+        "customer": f"{profile.first_name} {profile.last_name}" if profile else (reservation.user.email if reservation.user else "Admin Processed"),
+        "customer_email": reservation.user.email if reservation.user else None,
         "receipt_type": data.receipt_type,
         "reservation_id": reservation.unique_id,
         "room_number": reservation.room.number,
@@ -301,6 +306,14 @@ def pay_reservation_admin(
         "amount_paid": str(data.amount),
         "method": data.method
     }
+
+    if data.receipt_type == "fiscal_credit" and profile:
+        receipt_data.update({
+            "nit": profile.nit,
+            "nrc": profile.nrc,
+            "business_name": profile.business_name or f"{profile.first_name} {profile.last_name}",
+            "economic_activity": profile.economic_activity
+        })
 
     payment = Payment(
         reservation_id=data.reservation_id,

@@ -104,5 +104,8 @@ class RoomRead(RoomBase):
 
 class RoomSearchResponse(BaseModel):
     room: RoomRead
+    subtotal: Decimal | None = None
+    tax_iva: Decimal | None = None
+    tax_tourism: Decimal | None = None
     total_price: Decimal | None = None
     is_available: bool = True

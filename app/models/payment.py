@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Numeric, ForeignKey, func, DateTime, JSON
+from sqlalchemy import Column, Integer, String, Numeric, ForeignKey, func, DateTime, JSON, text
 from sqlalchemy.orm import relationship
 
 from app.db.session import Base
@@ -13,6 +13,6 @@ class Payment(Base):
     status = Column(String(50), nullable=False, default="pending")  # pending, completed, failed
     receipt_type = Column(String(50), nullable=True)  # fiscal_credit, final_consumer
     receipt_data = Column(JSON, nullable=True)  # stored JSON for the frontend to render
-    created_at = Column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    created_at = Column(DateTime(timezone=True), nullable=False, server_default=text('GETUTCDATE()'))
 
     reservation = relationship("Reservation", back_populates="payments")
