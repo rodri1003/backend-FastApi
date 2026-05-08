@@ -18,7 +18,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "https://keyless-accessarily-quintin.ngrok-free.dev"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -56,10 +56,15 @@ async def validation_exception_handler(request, exc: RequestValidationError):
         content={"detail": errors[0] if errors else "Error de validación"},
     )
 
+from app.services.reservation_service import auto_cancel_expired_reservations, auto_send_checkin_reminders
+import asyncio
+
 @app.on_event("startup")
 def on_startup() -> None:
     init_rbac_data()
     init_cloudinary()
+    asyncio.create_task(auto_cancel_expired_reservations())
+    asyncio.create_task(auto_send_checkin_reminders())
 
 
 app.include_router(users_router)

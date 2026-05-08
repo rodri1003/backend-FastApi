@@ -43,7 +43,7 @@ def search_rooms(
 
     # 2. Buscar reservaciones que se crucen con las fechas buscadas
     overlapping_reservations = db.query(Reservation).filter(
-        Reservation.status.in_(["pending", "confirmed"]),
+        Reservation.status.in_(["pending", "verifying", "confirmed"]),
         Reservation.check_in < check_out,
         Reservation.check_out > check_in,
         Reservation.is_deleted == False

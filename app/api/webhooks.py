@@ -11,13 +11,21 @@ import hmac
 import hashlib
 from app.core.config import settings
 from app.core.logging_utils import mask_pii
+from fastapi import BackgroundTasks
+from app.core.mail import send_reservation_confirmed_email
+from app.services.pdf_service import generate_receipt_pdf
+from app.services.dte_json_service import generate_dte_json
 
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
 
 @router.post("/wompi", status_code=status.HTTP_200_OK)
-async def wompi_webhook(request: Request, db: Session = Depends(get_db)):
+async def wompi_webhook(
+    request: Request, 
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
     """
     Recibe las notificaciones asíncronas de Wompi El Salvador.
     """
@@ -111,11 +119,26 @@ async def wompi_webhook(request: Request, db: Session = Depends(get_db)):
 
         actual_paid = amount if amount > 0 else res.total_cost
 
+        # Construir dirección completa y obtener datos del perfil
+        profile = res.user.profile if (res.user and res.user.profile) else None
+        address_parts = []
+        if profile:
+            if profile.address_complement: address_parts.append(profile.address_complement)
+            if profile.municipality: address_parts.append(profile.municipality)
+            if profile.department: address_parts.append(profile.department)
+            if profile.country: address_parts.append(profile.country)
+        
+        full_address = ", ".join(address_parts) if address_parts else "EL SALVADOR"
+
         # Generar comprobante
         receipt_data = {
             "company": "Hotel AFE",
             "date": datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
-            "customer": res.user.email if getattr(res, "user", None) else "Online Gateway",
+            "customer": f"{profile.first_name} {profile.last_name}" if profile else (res.user.email if res.user else "Online Gateway"),
+            "customer_email": res.user.email if res.user else None,
+            "customer_address": full_address,
+            "customer_phone": profile.phone if profile else "---",
+            "document_number": profile.document_number if profile else "---",
             "receipt_type": "Consumidor Final",
             "reservation_id": res.unique_id,
             "room_number": getattr(res.room, "number", "N/A") if res.room else "N/A",
@@ -142,6 +165,35 @@ async def wompi_webhook(request: Request, db: Session = Depends(get_db)):
         total_paid_before = sum([Decimal(str(p.amount)) for p in existing_payments if p.status == "completed"], Decimal("0.0"))
         if total_paid_before + Decimal(str(actual_paid)) >= Decimal(str(res.total_cost)):
             res.status = "confirmed"
+            
+            # Notificar al cliente tras éxito en Wompi
+            if res.user and res.user.email:
+                first_name = res.user.profile.first_name if (res.user.profile and res.user.profile.first_name) else "Cliente"
+                
+                # Generar PDF del DTE
+                try:
+                    pdf_content = generate_receipt_pdf(receipt_data)
+                except Exception as e:
+                    logger.error(f"Error generando PDF para reserva {res.unique_id} desde Webhook: {str(e)}")
+                    pdf_content = None
+
+                # Generar JSON del DTE
+                try:
+                    json_content = generate_dte_json(receipt_data)
+                except Exception as e:
+                    logger.error(f"Error generando JSON DTE para reserva {res.unique_id} desde Webhook: {str(e)}")
+                    json_content = None
+
+                background_tasks.add_task(
+                    send_reservation_confirmed_email,
+                    email=res.user.email,
+                    first_name=first_name,
+                    reservation_id=res.unique_id,
+                    check_in=res.check_in.strftime("%d/%m/%Y"),
+                    check_out=res.check_out.strftime("%d/%m/%Y"),
+                    pdf_content=pdf_content,
+                    json_content=json_content
+                )
             
         db.commit()
         logger.info(f"Successfully processed Wompi payment for reservation {res.id}")

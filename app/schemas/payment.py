@@ -19,6 +19,7 @@ class PaymentRead(BaseModel):
     method: str
     status: str
     receipt_type: str | None
+    receipt_url: str | None
     receipt_data: dict | None
     created_at: datetime
     

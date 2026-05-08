@@ -20,8 +20,10 @@ class Reservation(Base):
     tax_tourism = Column(Numeric(10, 2), nullable=True)
     total_cost = Column(Numeric(10, 2), nullable=False)
     
-    status = Column(String(50), nullable=False, default="pending")  # pending, confirmed, cancelled
+    status = Column(String(50), nullable=False, default="pending")  # pending, verifying, confirmed, cancelled
+    payment_method = Column(String(50), nullable=True)  # card, transfer, cash
     is_deleted = Column(Boolean, default=False, nullable=False)
+    reminder_sent = Column(Boolean, default=False, nullable=False)
     created_at = Column(DateTime(timezone=True), nullable=False, server_default=text('GETUTCDATE()'))
     updated_at = Column(DateTime(timezone=True), nullable=False, server_default=text('GETUTCDATE()'), onupdate=func.now())
 

@@ -39,4 +39,7 @@ class Settings:
     TAX_IVA: float = 0.13
     TAX_TOURISM: float = 0.05
 
+    # Payment Expiration Settings (in hours)
+    PENDING_RESERVATION_TIMEOUT_HOURS: int = int(os.getenv("PENDING_RESERVATION_TIMEOUT_HOURS", "24"))
+
 settings = Settings()

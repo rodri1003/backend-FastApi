@@ -9,7 +9,15 @@ from fastapi import APIRouter, Depends, HTTPException, Request, Query, UploadFil
 from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import get_current_user
-from app.core.mail import send_welcome_email
+from app.core.mail import (
+    send_welcome_email, 
+    send_reservation_confirmed_email, 
+    send_reservation_cancelled_email,
+    send_payment_rejected_email,
+    send_refund_processed_email
+)
+from app.services.pdf_service import generate_receipt_pdf
+from app.services.dte_json_service import generate_dte_json
 from app.db.session import get_db
 from app.models.user import User, Role, UserRole
 from app.models.audit import AuditLog
@@ -23,6 +31,7 @@ from app.schemas.reservation import ReservationRead, AdminReservationCreate, Adm
 from app.schemas.payment import PaymentCreate, PaymentRead
 from app.schemas.admin import PolicyRead, PolicyCreate, AuditLogRead
 from app.schemas.room import RoomTypeRead, RoomTypeCreate
+from typing import Optional
 from app.permissions.deps import require_permission
 from app.services.user_service import create_user_admin, update_user_admin
 from app.services.audit_service import log_action
@@ -63,12 +72,18 @@ def get_dashboard_stats(db: Session = Depends(get_db)):
     rev_prev_30 = db.query(func.sum(Payment.amount)).filter(Payment.status == "completed", Payment.created_at >= sixty_days_ago, Payment.created_at < thirty_days_ago).scalar() or 0
     
     # Count of occupied room-nights in last 30 days for ADR
-    occupied_nights_30 = db.query(Reservation).filter(
+    # Usamos DATEDIFF para SQL Server a través de func.datediff
+    raw_occupied_nights = db.query(
+        func.sum(func.datediff(text('day'), Reservation.check_in, Reservation.check_out))
+    ).filter(
         Reservation.status == "confirmed",
         Reservation.is_deleted == False,
         Reservation.check_in >= thirty_days_ago
-    ).count() or 1 # Avoid div by zero
+    ).scalar() or 1 # Avoid div by zero
     
+    occupied_nights_30 = int(raw_occupied_nights)
+    if occupied_nights_30 <= 0: occupied_nights_30 = 1
+
     adr = float(rev_last_30) / occupied_nights_30
     rev_par = float(rev_last_30) / (total_rooms * 30) if total_rooms > 0 else 0
 
@@ -81,9 +96,9 @@ def get_dashboard_stats(db: Session = Depends(get_db)):
     ).all()
     occupied_now = len(set(r[0] for r in occupied_room_ids))
     
-    # 4. Operations (Next 7 Days)
-    arrivals_next_7 = db.query(Reservation).filter(Reservation.check_in >= today, Reservation.check_in <= next_week, Reservation.is_deleted == False).count()
-    departures_next_7 = db.query(Reservation).filter(Reservation.check_out >= today, Reservation.check_out <= next_week, Reservation.is_deleted == False).count()
+    # 4. Operations (Next 7 Days) - Solo Confirmadas
+    arrivals_next_7 = db.query(Reservation).filter(Reservation.check_in >= today, Reservation.check_in <= next_week, Reservation.status == "confirmed", Reservation.is_deleted == False).count()
+    departures_next_7 = db.query(Reservation).filter(Reservation.check_out >= today, Reservation.check_out <= next_week, Reservation.status == "confirmed", Reservation.is_deleted == False).count()
 
     # Historical (30 days) - Ajustado a zona horaria El Salvador (-6h)
     # Usamos subquery para evitar errores de GROUP BY en SQL Server
@@ -135,7 +150,7 @@ def get_dashboard_stats(db: Session = Depends(get_db)):
     ).join(Room, Room.room_type_id == RoomType.id)\
      .join(Reservation, Reservation.room_id == Room.id)\
      .join(Payment, Payment.reservation_id == Reservation.id)\
-     .filter(Payment.status == "completed")\
+     .filter(Payment.status == "completed", Payment.created_at >= thirty_days_ago)\
      .group_by(RoomType.name).all()
     
     mix_data = [{"label": row.name, "value": float(row.total)} for row in market_mix]
@@ -146,7 +161,9 @@ def get_dashboard_stats(db: Session = Depends(get_db)):
                 "total": float(rev_total), 
                 "growth": calc_growth(float(rev_last_30), float(rev_prev_30)),
                 "adr": round(adr, 2),
-                "revpar": round(rev_par, 2)
+                "revpar": round(rev_par, 2),
+                "revpar_growth": calc_growth(float(rev_par), float(rev_prev_30 / (total_rooms * 30) if total_rooms > 0 else 0)),
+                "price_efficiency": round((adr / float(db.query(func.avg(Room.base_price)).filter(Room.is_active == True, Room.is_deleted == False).scalar() or 1)) * 100, 1)
             },
             "rooms": {
                 "total": total_rooms,
@@ -257,6 +274,7 @@ def pay_reservation_admin(
     res_id: int,
     data: PaymentCreate,
     request: Request,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -292,11 +310,25 @@ def pay_reservation_admin(
         raise HTTPException(status_code=400, detail="El monto del pago debe ser mayor a cero")
 
     profile = reservation.user.profile if reservation.user else None
+    
+    # Construir dirección completa
+    address_parts = []
+    if profile:
+        if profile.address_complement: address_parts.append(profile.address_complement)
+        if profile.municipality: address_parts.append(profile.municipality)
+        if profile.department: address_parts.append(profile.department)
+        if profile.country: address_parts.append(profile.country)
+    
+    full_address = ", ".join(address_parts) if address_parts else "EL SALVADOR"
+
     receipt_data = {
         "company": "Hotel AFE",
         "date": get_el_salvador_now().isoformat(),
         "customer": f"{profile.first_name} {profile.last_name}" if profile else (reservation.user.email if reservation.user else "Admin Processed"),
         "customer_email": reservation.user.email if reservation.user else None,
+        "customer_address": full_address,
+        "customer_phone": profile.phone if profile else "---",
+        "document_number": profile.document_number if profile else "---",
         "receipt_type": data.receipt_type,
         "reservation_id": reservation.unique_id,
         "room_number": reservation.room.number,
@@ -332,10 +364,114 @@ def pay_reservation_admin(
     db.commit()
     db.refresh(payment)
 
+    if reservation.status == "confirmed" and reservation.user and reservation.user.email:
+        first_name = reservation.user.profile.first_name if reservation.user.profile else "Cliente"
+        
+        # Generar PDF del DTE
+        try:
+            pdf_content = generate_receipt_pdf(payment.receipt_data)
+        except Exception as e:
+            print(f"Error generando PDF para reserva {reservation.unique_id}: {str(e)}")
+            pdf_content = None
+
+        # Generar JSON del DTE
+        try:
+            json_content = generate_dte_json(payment.receipt_data)
+        except Exception as e:
+            print(f"Error generando JSON DTE para reserva {reservation.unique_id}: {str(e)}")
+            json_content = None
+
+        background_tasks.add_task(
+            send_reservation_confirmed_email,
+            email=reservation.user.email,
+            first_name=first_name,
+            reservation_id=reservation.unique_id,
+            check_in=reservation.check_in.strftime("%d/%m/%Y"),
+            check_out=reservation.check_out.strftime("%d/%m/%Y"),
+            pdf_content=pdf_content,
+            json_content=json_content
+        )
+
     log_action(db, user_id=current_user.id, resource="reservations", action="update",
                method="POST", path=f"/admin/reservations/{res_id}/pay", status_code=200, request=request,
                metadata={"reservation_id": res_id, "payment_id": payment.id})
                
+    return payment
+
+@router.post("/reservations/{res_id}/refund", response_model=PaymentRead, dependencies=[Depends(require_permission("reservations", "update"))])
+def refund_reservation_balance(
+    res_id: int,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    reservation = db.query(Reservation).options(selectinload(Reservation.room), selectinload(Reservation.user)).filter(
+        Reservation.id == res_id,
+        Reservation.is_deleted == False
+    ).first()
+    
+    if not reservation:
+        raise HTTPException(status_code=404, detail="Reservación no encontrada")
+
+    from sqlalchemy import func
+    from decimal import Decimal
+    # Calcular balance actual
+    raw_total_paid = db.query(func.sum(Payment.amount)).filter(
+        Payment.reservation_id == res_id, 
+        Payment.status == "completed"
+    ).scalar() or 0.0
+    
+    total_paid = Decimal(str(raw_total_paid))
+    total_cost = Decimal(str(reservation.total_cost))
+    balance = total_cost - total_paid
+
+    if balance >= 0:
+        raise HTTPException(status_code=400, detail="No hay saldo a favor para devolver")
+
+    # El monto a devolver es el balance negativo
+    refund_amount = balance 
+    
+    profile = reservation.user.profile if reservation.user else None
+    receipt_data = {
+        "company": "Hotel AFE",
+        "date": get_el_salvador_now().isoformat(),
+        "customer": f"{profile.first_name} {profile.last_name}" if profile else (reservation.user.email if reservation.user else "Admin Refund"),
+        "customer_email": reservation.user.email if reservation.user else None,
+        "receipt_type": "refund",
+        "reservation_id": reservation.unique_id,
+        "amount_refunded": str(abs(refund_amount)),
+        "method": "refund"
+    }
+
+    payment = Payment(
+        reservation_id=res_id,
+        amount=refund_amount, 
+        method="refund",
+        status="completed",
+        receipt_type="refund",
+        receipt_data=receipt_data
+    )
+    db.add(payment)
+    db.commit()
+    db.refresh(payment)
+
+    log_action(db, user_id=current_user.id, resource="reservations", action="refund",
+               method="POST", path=f"/admin/reservations/{res_id}/refund", status_code=200, request=request,
+               metadata={"reservation_id": res_id, "refund_amount": str(refund_amount)})
+               
+    # Notificar al cliente sobre el reembolso
+    if reservation.user and reservation.user.email:
+        first_name = reservation.user.profile.first_name if reservation.user.profile else "Cliente"
+        background_tasks.add_task(
+            send_refund_processed_email,
+            email=reservation.user.email,
+            first_name=first_name,
+            reservation_id=reservation.unique_id,
+            amount=str(abs(refund_amount))
+        )
+
+    
     return payment
 
 from app.services.wompi_service import generate_wompi_payment_link
@@ -416,6 +552,165 @@ def get_payment_detail_admin(
         raise HTTPException(status_code=404, detail="Pago no encontrado")
         
     return payment
+
+from pydantic import BaseModel
+class PaymentVerifyRequest(BaseModel):
+    action: str  # "approve" | "reject"
+    reason: Optional[str] = None
+
+@router.post("/payments/{payment_id}/verify", response_model=PaymentRead, dependencies=[Depends(require_permission("payments", "update"))])
+async def verify_payment_admin(
+    payment_id: int,
+    data: PaymentVerifyRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if data.action not in ["approve", "reject"]:
+        raise HTTPException(status_code=400, detail="La acción debe ser 'approve' o 'reject'")
+
+    payment = db.query(Payment).options(
+        selectinload(Payment.reservation).selectinload(Reservation.user).selectinload(User.profile),
+        selectinload(Payment.reservation).selectinload(Reservation.room)
+    ).filter(Payment.id == payment_id).first()
+    
+    if not payment:
+        raise HTTPException(status_code=404, detail="Pago no encontrado")
+        
+    if payment.status != "verifying":
+        raise HTTPException(status_code=400, detail="El pago no está en estado de verificación")
+
+    reservation = payment.reservation
+
+    if data.action == "approve":
+        payment.status = "completed"
+        
+        # Check if full amount is met
+        from sqlalchemy import func
+        from decimal import Decimal
+        raw_total_paid = db.query(func.sum(Payment.amount)).filter(
+            Payment.reservation_id == reservation.id, 
+            Payment.status == "completed"
+        ).scalar() or 0.0
+        
+        total_paid = Decimal(str(raw_total_paid)) + Decimal(str(payment.amount))
+        
+        if total_paid >= Decimal(str(reservation.total_cost)):
+            reservation.status = "confirmed"
+            
+            # Notificar al cliente
+            if reservation.user and reservation.user.email:
+                first_name = reservation.user.profile.first_name if reservation.user.profile else "Cliente"
+                
+                # Generar PDF del DTE
+                try:
+                    pdf_content = generate_receipt_pdf(payment.receipt_data)
+                except Exception as e:
+                    print(f"Error generando PDF para reserva {reservation.unique_id}: {str(e)}")
+                    pdf_content = None
+
+                # Generar JSON del DTE
+                try:
+                    json_content = generate_dte_json(payment.receipt_data)
+                except Exception as e:
+                    print(f"Error generando JSON DTE para reserva {reservation.unique_id}: {str(e)}")
+                    json_content = None
+
+                background_tasks.add_task(
+                    send_reservation_confirmed_email,
+                    email=reservation.user.email,
+                    first_name=first_name,
+                    reservation_id=reservation.unique_id,
+                    check_in=reservation.check_in.strftime("%d/%m/%Y"),
+                    check_out=reservation.check_out.strftime("%d/%m/%Y"),
+                    pdf_content=pdf_content,
+                    json_content=json_content
+                )
+    else:
+        # reject
+        payment.status = "failed"
+        if data.reason:
+            # Almacenar motivo en el JSON de receipt_data para que el cliente lo vea
+            current_data = dict(payment.receipt_data) if payment.receipt_data else {}
+            current_data["rejection_reason"] = data.reason
+            payment.receipt_data = current_data
+
+        if reservation.status == "verifying":
+            reservation.status = "pending"  # Vuelve a estar pendiente de pago
+            
+        # Notificar al cliente sobre el rechazo
+        if reservation.user and reservation.user.email:
+            first_name = reservation.user.profile.first_name if reservation.user.profile else "Cliente"
+            background_tasks.add_task(
+                send_payment_rejected_email,
+                email=reservation.user.email,
+                first_name=first_name,
+                reservation_id=reservation.unique_id,
+                reason=data.reason or "Comprobante ilegible o inválido"
+            )
+
+    db.commit()
+    db.refresh(payment)
+    
+    log_action(db, user_id=current_user.id, resource="payments", action=f"verify_{data.action}",
+               method="POST", path=f"/admin/payments/{payment_id}/verify", status_code=200, request=request,
+               metadata={"payment_id": payment_id})
+               
+    return payment
+
+@router.post("/payments/{payment_id}/resend-email")
+async def resend_payment_email(
+    payment_id: int,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    current_user: User = Depends(get_current_user)
+):
+    """
+    Reenvía el correo de confirmación de una reservación, incluyendo el DTE.
+    """
+    payment = db.query(Payment).filter(Payment.id == payment_id).first()
+    if not payment:
+        raise HTTPException(status_code=404, detail="Pago no encontrado")
+    
+    if payment.status != "completed":
+        raise HTTPException(status_code=400, detail="Solo se pueden reenviar correos de pagos completados")
+        
+    reservation = payment.reservation
+    if not reservation:
+        raise HTTPException(status_code=404, detail="Reservación no encontrada")
+        
+    if not reservation.user or not reservation.user.email:
+        raise HTTPException(status_code=400, detail="El cliente no tiene un correo electrónico asociado")
+
+    # Generar PDF del DTE
+    try:
+        pdf_content = generate_receipt_pdf(payment.receipt_data)
+    except Exception as e:
+        print(f"Error generando PDF para reenvío (reserva {reservation.unique_id}): {str(e)}")
+        pdf_content = None
+
+    # Generar JSON del DTE
+    try:
+        json_content = generate_dte_json(payment.receipt_data)
+    except Exception as e:
+        print(f"Error generando JSON DTE para reenvío (reserva {reservation.unique_id}): {str(e)}")
+        json_content = None
+
+    first_name = reservation.user.profile.first_name if reservation.user.profile else "Cliente"
+    
+    background_tasks.add_task(
+        send_reservation_confirmed_email,
+        email=reservation.user.email,
+        first_name=first_name,
+        reservation_id=reservation.unique_id,
+        check_in=reservation.check_in.strftime("%d/%m/%Y"),
+        check_out=reservation.check_out.strftime("%d/%m/%Y"),
+        pdf_content=pdf_content,
+        json_content=json_content
+    )
+
+    return {"message": "Correo de confirmación encolado para reenvío"}
 
 
 # ----- Room Types Catalog -----
