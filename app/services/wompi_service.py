@@ -15,7 +15,7 @@ ENLACE_URL = "https://api.wompi.sv/EnlacePago"
 async def get_wompi_token() -> str:
     """Busca el token de acceso OAuth2 para Wompi El Salvador."""
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(verify=False) as client:
             data = {
                 "grant_type": "client_credentials",
                 "client_id": settings.WOMPI_APP_ID,
@@ -26,9 +26,12 @@ async def get_wompi_token() -> str:
             response.raise_for_status()
             token_data = response.json()
             return token_data.get("access_token")
+    except httpx.HTTPStatusError as e:
+        logger.error(f"HTTP Error obtaining Wompi SV token: {e.response.status_code} - {e.response.text}")
+        raise HTTPException(status_code=502, detail=f"Error de conexión con Wompi SV (Auth) - {e.response.text}")
     except Exception as e:
-        logger.error(f"Error obtaining Wompi SV token: {e}")
-        raise HTTPException(status_code=502, detail="Error de conexión con Wompi SV (Auth)")
+        logger.error(f"Error obtaining Wompi SV token: {type(e).__name__} - {str(e)}")
+        raise HTTPException(status_code=502, detail=f"Error de conexión con Wompi SV (Auth): {type(e).__name__} - {str(e)}")
 
 async def generate_wompi_payment_link(reservation_uid: str, amount: float, redirect_url: str) -> str:
     """
@@ -60,7 +63,7 @@ async def generate_wompi_payment_link(reservation_uid: str, amount: float, redir
     }
     
     try:
-        async with httpx.AsyncClient() as client:
+        async with httpx.AsyncClient(verify=False) as client:
             response = await client.post(ENLACE_URL, headers=headers, json=payload, timeout=15.0)
             
             if response.status_code != 200:

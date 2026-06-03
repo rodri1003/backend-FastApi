@@ -1,7 +1,23 @@
+import os
+import sys
+
+# Add parent directory to sys.path to allow imports from app
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
 from app.db.session import SessionLocal
 from app.models.payment import Payment
 from app.models.reservation import Reservation
-from app.models.room import Room
+from app.models.room import Room, RoomImage
+from app.models.room_type import RoomType
+from app.models.user import User
+from app.models.extra_amenity import ExtraAmenity, ReservationExtraAmenity
+from app.models.incidental_charge import IncidentalCharge, IncidentalChargeCategory
+from app.models.notification import Notification, NotificationSetting
+from app.models.system_setting import SystemSetting
+from app.models.amenity import Amenity
+from app.models.audit import AuditLog
 from sqlalchemy import func
 from datetime import datetime, timedelta
 
@@ -9,6 +25,8 @@ db = SessionLocal()
 
 now = datetime.utcnow()
 thirty_days_ago = now - timedelta(days=30)
+
+
 
 # Total revenue
 total_rev = db.query(func.sum(Payment.amount)).filter(Payment.status == "completed").scalar()

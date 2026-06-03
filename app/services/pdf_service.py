@@ -68,6 +68,35 @@ DATA_ALIGN   = ['C', 'C', 'C', 'L', 'R', 'R', 'R', 'R']
 
 
 def generate_receipt_pdf(receipt_data: dict) -> bytes:
+    from app.db.session import SessionLocal
+    from app.services.system_settings_service import get_setting
+
+    hotel_name = "AFE Resort & Spa"
+    hotel_phone = "2222-0000"
+    hotel_email = "facturacionelectronica@aferesort.com"
+
+    db = SessionLocal()
+    try:
+        hotel_name = get_setting(db, "hotel_name", "AFE Resort & Spa")
+        hotel_phone = get_setting(db, "hotel_phone", "2222-0000")
+        hotel_email = get_setting(db, "hotel_email", "facturacionelectronica@aferesort.com")
+    except Exception:
+        pass
+    finally:
+        db.close()
+
+    # Formatear valores para emisor
+    emisor_legal_name = f"{hotel_name.upper()} S.A. DE C.V." if "S.A." not in hotel_name.upper() else hotel_name.upper()
+    
+    # Generar iniciales para el logo
+    hotelAbbr = 'AFE'
+    if hotel_name != 'AFE Resort & Spa':
+        words = [w for w in hotel_name.split() if len(w) > 2]
+        if len(words) >= 2:
+            hotelAbbr = "".join(w[0] for w in words).upper()[:4]
+        else:
+            hotelAbbr = hotel_name[:3].upper()
+
     pdf = FPDF(orientation='P', unit='mm', format='Letter')
     pdf.set_auto_page_break(auto=False)
     pdf.add_page()
@@ -106,9 +135,22 @@ def generate_receipt_pdf(receipt_data: dict) -> bytes:
     payment_id = str(receipt_data.get("payment_id", random.randint(1000, 9999)))
     amount_paid = float(receipt_data.get("amount_paid", 0))
     total = amount_paid
-    base = total / 1.18
-    iva = base * 0.13
-    tourism = base * 0.05
+    room_base = float(receipt_data.get("room_base", total / 1.18))
+    room_iva = float(receipt_data.get("room_iva", room_base * 0.13))
+    room_tourism = float(receipt_data.get("room_tourism", room_base * 0.05))
+    extras_base = float(receipt_data.get("extras_base", 0))
+    extras_iva = float(receipt_data.get("extras_iva", 0))
+    incidentals_base = float(receipt_data.get("incidentals_base", 0))
+    
+    # Calculate incidentals_iva dynamically based on individual apply_tax properties
+    incidentals_iva = 0.0
+    for inc in receipt_data.get("incidentals", []):
+        if inc.get("apply_tax", True):
+            incidentals_iva += float(inc.get("amount", 0)) * float(inc.get("quantity", 1)) * 0.13
+
+    base = room_base + extras_base + incidentals_base
+    iva = room_iva + extras_iva + incidentals_iva
+    tourism = room_tourism
     date_val = receipt_data.get("date", datetime.now().isoformat())[:19].replace('T', ' ')
 
     # =========================================================================
@@ -120,11 +162,11 @@ def generate_receipt_pdf(receipt_data: dict) -> bytes:
     pdf.set_line_width(0.4)
     pdf.ellipse(LEFT, 15, 30, 30, 'D')
     pdf.set_font('Helvetica', 'B', 16)
-    afe_w = pdf.get_string_width('AFE')
-    text_at(logo_cx - afe_w/2, 32, 'AFE', style='B', size=16)
+    afe_w = pdf.get_string_width(hotelAbbr)
+    text_at(logo_cx - afe_w/2, 32, hotelAbbr, style='B', size=16)
     pdf.set_font('Helvetica', '', 5)
-    rs_w = pdf.get_string_width('RESORT & SPA')
-    text_at(logo_cx - rs_w/2, 37, 'RESORT & SPA', size=5, color=SLATE)
+    rs_w = pdf.get_string_width(hotel_name.upper()[:24])
+    text_at(logo_cx - rs_w/2, 37, hotel_name.upper()[:24], size=5, color=SLATE)
 
     # Center title
     text_at(70, 24, "DOCUMENTO TRIBUTARIO ELECTRÓNICO", style='B', size=10)
@@ -195,10 +237,10 @@ def generate_receipt_pdf(receipt_data: dict) -> bytes:
             ly += 4
 
     info_box(LEFT, box_y, box_w, 'EMISOR', [
-        ('Nombre:', 'AFE RESORT S.A. DE C.V.'),
-        ('Correo:', 'facturacionelectronica@aferesort.com'),
+        ('Nombre:', emisor_legal_name),
+        ('Correo:', hotel_email),
         ('Dirección:', 'Final Av. La Revolución, El Salvador'),
-        ('Teléfono:', '2222-0000'),
+        ('Teléfono:', hotel_phone),
         ('NIT:', '0614-010101-101-1    NRC: 123456-7'),
         ('Giro:', 'SERVICIOS DE ALOJAMIENTO'),
     ])
@@ -235,35 +277,104 @@ def generate_receipt_pdf(receipt_data: dict) -> bytes:
     pdf.line(LEFT, table_y + row_h, RIGHT, table_y + row_h)
     pdf.set_line_width(0.2)
 
-    # ---- Data Row 1: Alojamiento ----
-    r1_y = table_y + row_h
+    # ---- Data Rows: Itemized & Dynamic ----
+    allocated_items = receipt_data.get("items", [])
+    iva_rate = float(receipt_data.get("tax_iva_rate", 0.13))
+    room_num = receipt_data.get("room_number", "---")
+    res_id = receipt_data.get("reservation_id", "---")
+
+    if not allocated_items:
+        # Reconstrucción defensiva para recibos históricos (Legacy Fallback)
+        allocated_items = []
+        if room_base > 0.01:
+            allocated_items.append({
+                "type": "room",
+                "code": f"SRV-HOSP-{room_num}",
+                "name": f"Hospedaje Hab #{room_num} - {res_id}",
+                "quantity": 1.0,
+                "unit_price": room_base,
+                "apply_tax": True,
+                "total_amount": room_base,
+                "tax": room_iva,
+                "tourism": room_tourism,
+                "total": room_base + room_iva + room_tourism
+            })
+        for i, ex in enumerate(receipt_data.get("extras", [])):
+            qty = float(ex.get("quantity", 1))
+            total_net = float(ex.get("total_price", ex.get("unit_price", 0) * qty))
+            tax_val = total_net * iva_rate
+            allocated_items.append({
+                "type": "extra",
+                "code": f"SRV-EXTRA-{i+1}",
+                "name": f"Amenidad: {ex.get('name', 'Amenidad')}",
+                "quantity": qty,
+                "unit_price": float(ex.get("unit_price", 0)),
+                "apply_tax": True,
+                "total_amount": total_net,
+                "tax": tax_val,
+                "tourism": 0.0,
+                "total": total_net + tax_val
+            })
+        for i, inc in enumerate(receipt_data.get("incidentals", [])):
+            qty = float(inc.get("quantity", 1))
+            total_net = float(inc.get("total_amount", inc.get("amount", 0) * qty))
+            tax_val = total_net * iva_rate if inc.get("apply_tax", True) else 0.0
+            allocated_items.append({
+                "type": "incidental",
+                "code": f"SRV-INC-{i+1}",
+                "name": f"Incidental: {inc.get('description', 'Cargo')}",
+                "quantity": qty,
+                "unit_price": float(inc.get("amount", 0)),
+                "apply_tax": inc.get("apply_tax", True),
+                "total_amount": total_net,
+                "tax": tax_val,
+                "tourism": 0.0,
+                "total": total_net + tax_val
+            })
+
+    next_y = table_y + row_h
+    row_count = 1
     pdf.set_draw_color(*BORDER)
     pdf.set_font('Helvetica', '', 7)
 
-    u_price = base if is_fiscal else (base + iva)
-    row1 = [
-        "1", "1.00", "Servicio",
-        trunc(f"Hospedaje Hab #{receipt_data.get('room_number','---')} - {receipt_data.get('reservation_id','')}", COL_W[3] - 2, size=7),
-        f"${u_price:,.2f}", "$0.00", "$0.00", f"${u_price:,.2f}"
-    ]
-    for i, val in enumerate(row1):
-        cell_at(COL_X[i], r1_y, COL_W[i], row_h, val,
-                border=1, align=DATA_ALIGN[i], size=7, color=BLACK)
+    for item in allocated_items:
+        apply_tax = item.get("apply_tax", True)
+        cov_total_net = float(item["total_amount"])
+        cov_tax = float(item["tax"])
+        
+        qty = float(item["quantity"])
+        unit_net = float(item["unit_price"])
+        
+        if not is_fiscal and apply_tax:
+            u_price = unit_net * (1.0 + iva_rate)
+        else:
+            u_price = unit_net
+            
+        tot_row_val = u_price * qty
+        
+        pdf.set_fill_color(255, 255, 255)
+        row_cols = [
+            str(row_count), f"{qty:.2f}", "Servicio",
+            trunc(item["name"], COL_W[3] - 2, size=7),
+            f"${u_price:,.2f}", "$0.00", "$0.00", f"${tot_row_val:,.2f}"
+        ]
+        for i, val in enumerate(row_cols):
+            cell_at(COL_X[i], next_y, COL_W[i], row_h, val,
+                    border=1, align=DATA_ALIGN[i], size=7, color=BLACK)
+        next_y += row_h
+        row_count += 1
 
-    # ---- Data Row 2: Turismo ----
-    r2_y = r1_y + row_h
+    # ---- Data Row: Turismo ----
     if tourism > 0:
         pdf.set_fill_color(*BG)
         row2 = [
-            "2", "1.00", "Impuesto", "Impuesto de Turismo (5%)",
+            str(row_count), "1.00", "Impuesto", "Impuesto de Turismo (5%)",
             f"${tourism:,.2f}", "$0.00", "$0.00", f"${tourism:,.2f}"
         ]
         for i, val in enumerate(row2):
-            cell_at(COL_X[i], r2_y, COL_W[i], row_h, val,
+            cell_at(COL_X[i], next_y, COL_W[i], row_h, val,
                     border=1, align=DATA_ALIGN[i], size=7, fill=True, color=BLACK)
-        next_y = r2_y + row_h
-    else:
-        next_y = r2_y
+        next_y += row_h
 
     # ---- Empty filler rows (to reach a fixed bottom) ----
     table_bottom = 178
@@ -343,7 +454,7 @@ def generate_receipt_pdf(receipt_data: dict) -> bytes:
     pdf.set_line_width(0.4)
     pdf.line(LEFT, footer_y, RIGHT, footer_y)
 
-    text_at(LEFT, footer_y + 4, 'Responsable: AFE RESORT S.A. DE C.V.', style='B', size=7, color=SLATE)
+    text_at(LEFT, footer_y + 4, f'Responsable: {emisor_legal_name}', style='B', size=7, color=SLATE)
     text_at(RIGHT - 45, footer_y + 4, f'N\u00ba Documento: {payment_id}', style='B', size=7, color=SLATE)
 
     pdf.set_font('Helvetica', 'B', 7)

@@ -14,7 +14,8 @@ from app.core.mail import (
     send_reservation_confirmed_email, 
     send_reservation_cancelled_email,
     send_payment_rejected_email,
-    send_refund_processed_email
+    send_refund_processed_email,
+    send_payment_receipt_email
 )
 from app.services.pdf_service import generate_receipt_pdf
 from app.services.dte_json_service import generate_dte_json
@@ -88,13 +89,42 @@ def get_dashboard_stats(db: Session = Depends(get_db)):
     rev_par = float(rev_last_30) / (total_rooms * 30) if total_rooms > 0 else 0
 
     # 3. Occupancy Distribution (Live)
-    occupied_room_ids = db.query(Reservation.room_id).filter(
-        Reservation.check_in <= today,
-        Reservation.check_out > today,
+    from app.services import system_settings_service as sss
+    from datetime import time, datetime
+    
+    checkin_time = sss.get_checkin_time(db)
+    checkout_time = sss.get_checkout_time(db)
+
+    try:
+        ci_h, ci_m = map(int, checkin_time.split(":"))
+        checkin_t = time(ci_h, ci_m)
+    except Exception:
+        checkin_t = time(15, 0)
+
+    try:
+        co_h, co_m = map(int, checkout_time.split(":"))
+        checkout_t = time(co_h, co_m)
+    except Exception:
+        checkout_t = time(11, 0)
+
+    now_local = get_el_salvador_now().replace(tzinfo=None)
+    
+    # Obtener reservas confirmadas que tocan el día de hoy
+    reservations_today = db.query(Reservation).filter(
         Reservation.status == "confirmed",
-        Reservation.is_deleted == False
+        Reservation.is_deleted == False,
+        Reservation.check_in <= today,
+        Reservation.check_out >= today
     ).all()
-    occupied_now = len(set(r[0] for r in occupied_room_ids))
+
+    occupied_now_set = set()
+    for res in reservations_today:
+        start_dt = datetime.combine(res.check_in, checkin_t)
+        end_dt = datetime.combine(res.check_out, checkout_t)
+        if start_dt <= now_local < end_dt:
+            occupied_now_set.add(res.room_id)
+            
+    occupied_now = len(occupied_now_set)
     
     # 4. Operations (Next 7 Days) - Solo Confirmadas
     arrivals_next_7 = db.query(Reservation).filter(Reservation.check_in >= today, Reservation.check_in <= next_week, Reservation.status == "confirmed", Reservation.is_deleted == False).count()
@@ -118,47 +148,134 @@ def get_dashboard_stats(db: Session = Depends(get_db)):
     revenue_map = {str(row.day): float(row.total) for row in chart_data_raw}
     
     # Forecast (Next 7 days based on pending/confirmed reservations)
-    forecast_raw = db.query(
-        Reservation.check_in.label("day"),
-        func.sum(Reservation.total_cost).label("total")
-    ).filter(
+    reservations_next_7 = db.query(Reservation).filter(
         Reservation.status.in_(["pending", "confirmed"]),
         Reservation.check_in >= today,
         Reservation.check_in <= next_week,
         Reservation.is_deleted == False
-    ).group_by(Reservation.check_in).all()
-    
-    forecast_map = {str(row.day): float(row.total) for row in forecast_raw}
+    ).all()
+
+    from collections import defaultdict
+    from decimal import Decimal
+    forecast_accrual_map = defaultdict(float)
+    forecast_cash_map = defaultdict(float)
+
+    for res in reservations_next_7:
+        day_str = str(res.check_in)
+        # Accrual (Devengado): just lodging total_cost
+        forecast_accrual_map[day_str] += float(res.total_cost or 0)
+        
+        # Cash (Caja): pending balance to collect
+        from app.services.reservation_service import calculate_grand_total
+        grand_total = calculate_grand_total(res, db)
+        
+        raw_paid = db.query(func.sum(Payment.amount)).filter(
+            Payment.reservation_id == res.id,
+            Payment.status == "completed"
+        ).scalar() or 0.0
+        
+        pending = max(Decimal("0.0"), grand_total - Decimal(str(raw_paid)))
+        forecast_cash_map[day_str] += float(pending)
 
     full_trend = []
     # Combine Historical
     for i in range(29, -1, -1):
         d = (today - timedelta(days=i))
         d_str = d.isoformat()
-        full_trend.append({"date": d_str, "amount": revenue_map.get(d_str, 0.0), "type": "actual"})
+        amount_val = revenue_map.get(d_str, 0.0)
+        full_trend.append({
+            "date": d_str, 
+            "amount": amount_val, 
+            "amount_cash": amount_val, 
+            "type": "actual"
+        })
     
     # Add Forecast
     for i in range(1, 8):
         d = (today + timedelta(days=i))
         d_str = d.isoformat()
-        full_trend.append({"date": d_str, "amount": forecast_map.get(d_str, 0.0), "type": "forecast"})
+        full_trend.append({
+            "date": d_str, 
+            "amount": forecast_accrual_map.get(d_str, 0.0), 
+            "amount_cash": forecast_cash_map.get(d_str, 0.0), 
+            "type": "forecast"
+        })
 
-    # 6. Market Mix (Revenue by Room Type)
-    market_mix = db.query(
-        RoomType.name,
-        func.sum(Payment.amount).label("total")
-    ).join(Room, Room.room_type_id == RoomType.id)\
-     .join(Reservation, Reservation.room_id == Room.id)\
-     .join(Payment, Payment.reservation_id == Reservation.id)\
-     .filter(Payment.status == "completed", Payment.created_at >= thirty_days_ago)\
-     .group_by(RoomType.name).all()
-    
-    mix_data = [{"label": row.name, "value": float(row.total)} for row in market_mix]
+    # 6. Market Mix (Revenue by Room Type) - Compute both Gross and Net room revenue allocations!
+    from decimal import Decimal
+    from app.services.system_settings_service import get_tax_iva, get_tax_tourism
+    from sqlalchemy.orm import selectinload
+    iva_rate = Decimal(str(get_tax_iva(db)))
+    tourism_rate = Decimal(str(get_tax_tourism(db)))
+    room_tax_factor = Decimal("1.0") + iva_rate + tourism_rate
+
+    completed_payments_30 = db.query(Payment).options(
+        selectinload(Payment.reservation).selectinload(Reservation.room).selectinload(Room.room_type),
+        selectinload(Payment.reservation).selectinload(Reservation.incidental_charges)
+    ).filter(
+        Payment.status == "completed",
+        Payment.created_at >= thirty_days_ago
+    ).all()
+
+    from collections import defaultdict
+    mix_gross_map = defaultdict(Decimal)
+    mix_net_map = defaultdict(Decimal)
+
+    # Initialize all active room types
+    active_room_types = db.query(RoomType.name).filter(RoomType.is_deleted == False).all()
+    for rt in active_room_types:
+        mix_gross_map[rt.name] = Decimal("0.0")
+        mix_net_map[rt.name] = Decimal("0.0")
+
+    for pay in completed_payments_30:
+        res = pay.reservation
+        if not res or not res.room or not res.room.room_type:
+            continue
+        
+        rt_name = res.room.room_type.name
+        amount = Decimal(str(pay.amount or 0))
+
+        mix_gross_map[rt_name] += amount
+
+        # Net lodging calculation (pro-rata based on reservation base values)
+        room_base = Decimal(str(res.subtotal)) if res.subtotal is not None else Decimal(str(res.total_cost or 0)) / room_tax_factor
+        room_iva = Decimal(str(res.tax_iva)) if res.tax_iva is not None else room_base * iva_rate
+        room_tourism = Decimal(str(res.tax_tourism)) if res.tax_tourism is not None else room_base * tourism_rate
+        room_total = room_base + room_iva + room_tourism
+
+        extras_base = Decimal(str(res.extras_total or 0))
+        extras_iva = extras_base * iva_rate
+        extras_total = extras_base + extras_iva
+
+        inc_base = Decimal(str(res.incidentals_total or 0))
+        inc_iva = Decimal("0.0")
+        if res.incidental_charges:
+            for ch in res.incidental_charges:
+                if ch.payment_status != "waived" and ch.apply_tax:
+                    inc_iva += Decimal(str(ch.total_amount or 0)) * iva_rate
+        inc_total = inc_base + inc_iva
+
+        grand_total = room_total + extras_total + inc_total
+        if grand_total <= 0:
+            grand_total = Decimal("1.0")
+
+        prop_room = room_base / grand_total
+        p_room_net = amount * prop_room
+        mix_net_map[rt_name] += p_room_net
+
+    mix_data = [
+        {
+            "label": k,
+            "value": float(v),
+            "net_value": float(mix_net_map[k])
+        } for k, v in mix_gross_map.items()
+    ]
 
     return {
         "kpis": {
             "revenue": {
-                "total": float(rev_total), 
+                "total": float(rev_last_30), 
+                "historical_total": float(rev_total),
                 "growth": calc_growth(float(rev_last_30), float(rev_prev_30)),
                 "adr": round(adr, 2),
                 "revpar": round(rev_par, 2),
@@ -281,7 +398,14 @@ def pay_reservation_admin(
     if data.reservation_id != res_id:
         raise HTTPException(status_code=400, detail="El ID en el body no coincide con la ruta")
 
-    reservation = db.query(Reservation).options(selectinload(Reservation.room), selectinload(Reservation.user)).filter(
+    from app.models.extra_amenity import ReservationExtraAmenity
+    from app.models.incidental_charge import IncidentalCharge
+    reservation = db.query(Reservation).options(
+        selectinload(Reservation.room), 
+        selectinload(Reservation.user),
+        selectinload(Reservation.extras).selectinload(ReservationExtraAmenity.extra_amenity),
+        selectinload(Reservation.incidental_charges)
+    ).filter(
         Reservation.id == res_id,
         Reservation.is_deleted == False
     ).first()
@@ -300,8 +424,9 @@ def pay_reservation_admin(
     ).scalar() or 0.0
 
     total_paid = Decimal(str(raw_total_paid))
-    total_cost = Decimal(str(reservation.total_cost))
-    balance = total_cost - total_paid
+    from app.services.reservation_service import calculate_grand_total
+    grand_total = calculate_grand_total(reservation, db)
+    balance = grand_total - total_paid
 
     if balance <= 0:
         raise HTTPException(status_code=400, detail="Esta reservación ya ha sido pagada en su totalidad")
@@ -320,6 +445,24 @@ def pay_reservation_admin(
         if profile.country: address_parts.append(profile.country)
     
     full_address = ", ".join(address_parts) if address_parts else "EL SALVADOR"
+    
+    # Generar receipt data de forma itemizada y dinámica
+    from app.services.system_settings_service import get_tax_iva, get_tax_tourism
+    from app.services.payment_allocation_service import allocate_payment_items
+    
+    iva_rate = float(get_tax_iva(db))
+    tourism_rate = float(get_tax_tourism(db))
+    allocated_items = allocate_payment_items(db, reservation, Decimal(str(data.amount)))
+    
+    room_base = sum(item["total_amount"] for item in allocated_items if item["type"] == "room")
+    room_iva = sum(item["tax"] for item in allocated_items if item["type"] == "room")
+    room_tourism = sum(item["tourism"] for item in allocated_items if item["type"] == "room")
+    
+    extras_base = sum(item["total_amount"] for item in allocated_items if item["type"] == "extra")
+    extras_iva = sum(item["tax"] for item in allocated_items if item["type"] == "extra")
+    
+    incidentals_base = sum(item["total_amount"] for item in allocated_items if item["type"] == "incidental")
+    incidentals_iva = sum(item["tax"] for item in allocated_items if item["type"] == "incidental")
 
     receipt_data = {
         "company": "Hotel AFE",
@@ -336,7 +479,19 @@ def pay_reservation_admin(
         "check_in": reservation.check_in.isoformat(),
         "check_out": reservation.check_out.isoformat(),
         "amount_paid": str(data.amount),
-        "method": data.method
+        "method": data.method,
+        "tax_iva_rate": iva_rate,
+        "tax_tourism_rate": tourism_rate,
+        "room_base": float(room_base),
+        "room_iva": float(room_iva),
+        "room_tourism": float(room_tourism),
+        "extras_base": float(extras_base),
+        "extras_iva": float(extras_iva),
+        "incidentals_base": float(incidentals_base),
+        "incidentals_iva": float(incidentals_iva),
+        "items": allocated_items,
+        "extras": [ex for ex in allocated_items if ex["type"] == "extra"],
+        "incidentals": [inc for inc in allocated_items if inc["type"] == "incidental"]
     }
 
     if data.receipt_type == "fiscal_credit" and profile:
@@ -356,41 +511,66 @@ def pay_reservation_admin(
         receipt_data=receipt_data
     )
     db.add(payment)
-    
+
+    # Capturar estado previo antes de modificar
+    was_confirmed = reservation.status == "confirmed"
+
     # Auto-update status if fully paid
-    if total_paid + Decimal(str(data.amount)) >= Decimal(str(reservation.total_cost)):
+    if total_paid + Decimal(str(data.amount)) >= grand_total:
         reservation.status = "confirmed"
+        for extra in reservation.extras:
+            if extra.payment_status == "pending":
+                extra.payment_status = "paid"
+        for inc in reservation.incidental_charges:
+            if inc.payment_status == "pending":
+                inc.payment_status = "paid"
     
     db.commit()
     db.refresh(payment)
 
-    if reservation.status == "confirmed" and reservation.user and reservation.user.email:
+    if reservation.user and reservation.user.email:
+        from app.utils.date_utils import format_payment_datetime
         first_name = reservation.user.profile.first_name if reservation.user.profile else "Cliente"
-        
-        # Generar PDF del DTE
+        payment_date_fmt = format_payment_datetime()
+
+        # Generar PDF y JSON del DTE (compartido entre ambos emails)
         try:
             pdf_content = generate_receipt_pdf(payment.receipt_data)
         except Exception as e:
             print(f"Error generando PDF para reserva {reservation.unique_id}: {str(e)}")
             pdf_content = None
 
-        # Generar JSON del DTE
         try:
             json_content = generate_dte_json(payment.receipt_data)
         except Exception as e:
             print(f"Error generando JSON DTE para reserva {reservation.unique_id}: {str(e)}")
             json_content = None
 
+        # SIEMPRE: enviar comprobante de pago con DTE
         background_tasks.add_task(
-            send_reservation_confirmed_email,
+            send_payment_receipt_email,
             email=reservation.user.email,
             first_name=first_name,
             reservation_id=reservation.unique_id,
-            check_in=reservation.check_in.strftime("%d/%m/%Y"),
-            check_out=reservation.check_out.strftime("%d/%m/%Y"),
+            payment_amount=f"{float(data.amount):.2f}",
+            payment_method=data.method,
+            payment_date=payment_date_fmt,
             pdf_content=pdf_content,
             json_content=json_content
         )
+
+        # SOLO si la reserva acaba de confirmarse por primera vez
+        if not was_confirmed and reservation.status == "confirmed":
+            background_tasks.add_task(
+                send_reservation_confirmed_email,
+                email=reservation.user.email,
+                first_name=first_name,
+                reservation_id=reservation.unique_id,
+                check_in=reservation.check_in.strftime("%d/%m/%Y"),
+                check_out=reservation.check_out.strftime("%d/%m/%Y"),
+                pdf_content=pdf_content,
+                json_content=json_content
+            )
 
     log_action(db, user_id=current_user.id, resource="reservations", action="update",
                method="POST", path=f"/admin/reservations/{res_id}/pay", status_code=200, request=request,
@@ -423,8 +603,9 @@ def refund_reservation_balance(
     ).scalar() or 0.0
     
     total_paid = Decimal(str(raw_total_paid))
-    total_cost = Decimal(str(reservation.total_cost))
-    balance = total_cost - total_paid
+    from app.services.reservation_service import calculate_grand_total
+    grand_total = calculate_grand_total(reservation, db)
+    balance = grand_total - total_paid
 
     if balance >= 0:
         raise HTTPException(status_code=400, detail="No hay saldo a favor para devolver")
@@ -491,8 +672,8 @@ async def create_wompi_link_admin(
     
     if not reservation:
         raise HTTPException(status_code=404, detail="Reservación no encontrada o ha sido eliminada")
-    if reservation.status != "pending":
-        raise HTTPException(status_code=400, detail="La reservación no está pendiente de pago")
+    if reservation.status not in ["pending", "confirmed"]:
+        raise HTTPException(status_code=400, detail="La reservación no está en un estado que permita pagos")
         
     from sqlalchemy import func
     from app.models.payment import Payment
@@ -503,7 +684,9 @@ async def create_wompi_link_admin(
     ).scalar() or 0.0
     
     total_paid = Decimal(str(raw_total_paid))
-    balance = Decimal(str(reservation.total_cost)) - total_paid
+    from app.services.reservation_service import calculate_grand_total
+    grand_total = calculate_grand_total(reservation, db)
+    balance = grand_total - total_paid
     
     if balance <= 0:
         raise HTTPException(status_code=400, detail="Esta reservación ya está pagada")
@@ -570,9 +753,11 @@ async def verify_payment_admin(
     if data.action not in ["approve", "reject"]:
         raise HTTPException(status_code=400, detail="La acción debe ser 'approve' o 'reject'")
 
+    from app.models.extra_amenity import ReservationExtraAmenity
     payment = db.query(Payment).options(
         selectinload(Payment.reservation).selectinload(Reservation.user).selectinload(User.profile),
-        selectinload(Payment.reservation).selectinload(Reservation.room)
+        selectinload(Payment.reservation).selectinload(Reservation.room),
+        selectinload(Payment.reservation).selectinload(Reservation.extras).selectinload(ReservationExtraAmenity.extra_amenity)
     ).filter(Payment.id == payment_id).first()
     
     if not payment:
@@ -585,38 +770,72 @@ async def verify_payment_admin(
 
     if data.action == "approve":
         payment.status = "completed"
-        
+
+        # Capturar estado previo antes de modificar
+        was_confirmed = reservation.status == "confirmed"
+
+        # Dispatch payment notification
+        from app.services import notification_service as notif_svc
+        notif_svc.notify_payment_received(db, reservation, payment.amount)
+
         # Check if full amount is met
         from sqlalchemy import func
         from decimal import Decimal
         raw_total_paid = db.query(func.sum(Payment.amount)).filter(
-            Payment.reservation_id == reservation.id, 
+            Payment.reservation_id == reservation.id,
             Payment.status == "completed"
         ).scalar() or 0.0
-        
+
         total_paid = Decimal(str(raw_total_paid)) + Decimal(str(payment.amount))
-        
-        if total_paid >= Decimal(str(reservation.total_cost)):
+
+        from app.services.reservation_service import calculate_grand_total
+        grand_total = calculate_grand_total(reservation, db)
+
+        if total_paid >= grand_total:
             reservation.status = "confirmed"
-            
-            # Notificar al cliente
-            if reservation.user and reservation.user.email:
-                first_name = reservation.user.profile.first_name if reservation.user.profile else "Cliente"
-                
-                # Generar PDF del DTE
-                try:
-                    pdf_content = generate_receipt_pdf(payment.receipt_data)
-                except Exception as e:
-                    print(f"Error generando PDF para reserva {reservation.unique_id}: {str(e)}")
-                    pdf_content = None
+            for extra in reservation.extras:
+                if extra.payment_status == "pending":
+                    extra.payment_status = "paid"
+            for inc in reservation.incidental_charges:
+                if inc.payment_status == "pending":
+                    inc.payment_status = "paid"
+            # Dispatch reservation confirmed notification if applicable
+            notif_svc.notify_reservation_confirmed(db, reservation)
 
-                # Generar JSON del DTE
-                try:
-                    json_content = generate_dte_json(payment.receipt_data)
-                except Exception as e:
-                    print(f"Error generando JSON DTE para reserva {reservation.unique_id}: {str(e)}")
-                    json_content = None
+        # Notificar al cliente — siempre enviar comprobante de pago
+        if reservation.user and reservation.user.email:
+            from app.utils.date_utils import format_payment_datetime
+            first_name = reservation.user.profile.first_name if reservation.user.profile else "Cliente"
+            payment_date_fmt = format_payment_datetime()
 
+            # Generar PDF y JSON del DTE (compartido entre ambos emails)
+            try:
+                pdf_content = generate_receipt_pdf(payment.receipt_data)
+            except Exception as e:
+                print(f"Error generando PDF para reserva {reservation.unique_id}: {str(e)}")
+                pdf_content = None
+
+            try:
+                json_content = generate_dte_json(payment.receipt_data)
+            except Exception as e:
+                print(f"Error generando JSON DTE para reserva {reservation.unique_id}: {str(e)}")
+                json_content = None
+
+            # SIEMPRE: enviar comprobante de pago con DTE
+            background_tasks.add_task(
+                send_payment_receipt_email,
+                email=reservation.user.email,
+                first_name=first_name,
+                reservation_id=reservation.unique_id,
+                payment_amount=f"{float(payment.amount):.2f}",
+                payment_method=payment.method or "transfer",
+                payment_date=payment_date_fmt,
+                pdf_content=pdf_content,
+                json_content=json_content
+            )
+
+            # SOLO si la reserva acaba de confirmarse por primera vez
+            if not was_confirmed and reservation.status == "confirmed":
                 background_tasks.add_task(
                     send_reservation_confirmed_email,
                     email=reservation.user.email,
@@ -667,19 +886,19 @@ async def resend_payment_email(
     current_user: User = Depends(get_current_user)
 ):
     """
-    Reenvía el correo de confirmación de una reservación, incluyendo el DTE.
+    Reenvía el comprobante de pago (DTE) al cliente para un pago completado.
     """
     payment = db.query(Payment).filter(Payment.id == payment_id).first()
     if not payment:
         raise HTTPException(status_code=404, detail="Pago no encontrado")
-    
+
     if payment.status != "completed":
         raise HTTPException(status_code=400, detail="Solo se pueden reenviar correos de pagos completados")
-        
+
     reservation = payment.reservation
     if not reservation:
         raise HTTPException(status_code=404, detail="Reservación no encontrada")
-        
+
     if not reservation.user or not reservation.user.email:
         raise HTTPException(status_code=400, detail="El cliente no tiene un correo electrónico asociado")
 
@@ -698,20 +917,200 @@ async def resend_payment_email(
         json_content = None
 
     first_name = reservation.user.profile.first_name if reservation.user.profile else "Cliente"
-    
+
+    # Reconstruir fecha del pago desde receipt_data o usar la fecha de creación
+    receipt_data = payment.receipt_data or {}
+    payment_date_raw = receipt_data.get("date", "")
+    try:
+        from datetime import datetime as dt
+        payment_date_fmt = dt.fromisoformat(payment_date_raw.replace("Z", "+00:00")).strftime("%d/%m/%Y %I:%M %p")
+    except Exception:
+        payment_date_fmt = payment.created_at.strftime("%d/%m/%Y") if payment.created_at else "---"
+
+    # Reenviar comprobante de pago (DTE) — opción A: siempre el comprobante
     background_tasks.add_task(
-        send_reservation_confirmed_email,
+        send_payment_receipt_email,
         email=reservation.user.email,
         first_name=first_name,
         reservation_id=reservation.unique_id,
-        check_in=reservation.check_in.strftime("%d/%m/%Y"),
-        check_out=reservation.check_out.strftime("%d/%m/%Y"),
+        payment_amount=f"{float(payment.amount):.2f}",
+        payment_method=payment.method or "card",
+        payment_date=payment_date_fmt,
         pdf_content=pdf_content,
         json_content=json_content
     )
 
-    return {"message": "Correo de confirmación encolado para reenvío"}
+    return {"message": "Comprobante de pago (DTE) encolado para reenvío"}
 
+
+# ----- Amenities Catalog -----
+
+from app.models.amenity import Amenity, AmenityCategory
+from app.schemas.amenity import AmenityRead, AmenityCreate, AmenityUpdate, AmenityCategoryRead, AmenityCategoryCreate, AmenityCategoryUpdate
+
+@router.get("/amenity-categories", response_model=list[AmenityCategoryRead], dependencies=[Depends(require_permission("rooms", "read"))])
+def get_admin_amenity_categories(db: Session = Depends(get_db)):
+    return db.query(AmenityCategory).filter(AmenityCategory.is_deleted == False).order_by(AmenityCategory.name).all()
+
+@router.post("/amenity-categories", response_model=AmenityCategoryRead, status_code=201, dependencies=[Depends(require_permission("rooms", "create"))])
+def create_admin_amenity_category(
+    data: AmenityCategoryCreate,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    exists = db.query(AmenityCategory).filter(AmenityCategory.name == data.name).first()
+    if exists:
+        if exists.is_deleted:
+            exists.is_deleted = False
+            db.commit()
+            db.refresh(exists)
+            log_action(db, user_id=current_user.id, resource="amenity_categories", action="create (reactivated)",
+                       method="POST", path="/admin/amenity-categories", status_code=201, request=request,
+                       metadata={"category_name": exists.name})
+            return exists
+        else:
+            raise HTTPException(status_code=400, detail="Esta categoría ya existe.")
+    
+    new_cat = AmenityCategory(name=data.name)
+    db.add(new_cat)
+    db.commit()
+    db.refresh(new_cat)
+    
+    log_action(db, user_id=current_user.id, resource="amenity_categories", action="create",
+               method="POST", path="/admin/amenity-categories", status_code=201, request=request,
+               metadata={"category_name": new_cat.name})
+    return new_cat
+
+@router.put("/amenity-categories/{category_id}", response_model=AmenityCategoryRead, dependencies=[Depends(require_permission("rooms", "update"))])
+def update_admin_amenity_category(
+    category_id: int,
+    data: AmenityCategoryUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    cat = db.query(AmenityCategory).filter(AmenityCategory.id == category_id, AmenityCategory.is_deleted == False).first()
+    if not cat:
+        raise HTTPException(status_code=404, detail="Categoría no encontrada")
+    
+    dup = db.query(AmenityCategory).filter(AmenityCategory.name == data.name, AmenityCategory.id != category_id, AmenityCategory.is_deleted == False).first()
+    if dup:
+        raise HTTPException(status_code=400, detail="Ya existe una categoría con ese nombre.")
+    
+    cat.name = data.name
+    db.commit()
+    db.refresh(cat)
+    
+    log_action(db, user_id=current_user.id, resource="amenity_categories", action="update",
+               method="PUT", path=f"/admin/amenity-categories/{category_id}", status_code=200, request=request,
+               metadata={"category_id": category_id})
+    return cat
+
+@router.delete("/amenity-categories/{category_id}", dependencies=[Depends(require_permission("rooms", "delete"))])
+def delete_admin_amenity_category(
+    category_id: int,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    cat = db.query(AmenityCategory).filter(AmenityCategory.id == category_id, AmenityCategory.is_deleted == False).first()
+    if not cat:
+        raise HTTPException(status_code=404, detail="Categoría no encontrada")
+    
+    cat.is_deleted = True
+    db.commit()
+    
+    log_action(db, user_id=current_user.id, resource="amenity_categories", action="delete",
+               method="DELETE", path=f"/admin/amenity-categories/{category_id}", status_code=200, request=request,
+               metadata={"category_id": category_id})
+    return {"detail": "Categoría eliminada lógicamente"}
+
+@router.get("/amenities", response_model=list[AmenityRead], dependencies=[Depends(require_permission("rooms", "read"))])
+def get_admin_amenities(db: Session = Depends(get_db)):
+    return db.query(Amenity).filter(Amenity.is_deleted == False).order_by(Amenity.category_id, Amenity.name).all()
+
+@router.post("/amenities", response_model=AmenityRead, status_code=201, dependencies=[Depends(require_permission("rooms", "create"))])
+def create_admin_amenity(
+    data: AmenityCreate,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    exists = db.query(Amenity).filter(Amenity.name == data.name).first()
+    if exists:
+        if exists.is_deleted:
+            exists.is_deleted = False
+            exists.icon = data.icon
+            exists.category_id = data.category_id
+            db.commit()
+            db.refresh(exists)
+            log_action(db, user_id=current_user.id, resource="amenities", action="create (reactivated)",
+                       method="POST", path="/admin/amenities", status_code=201, request=request,
+                       metadata={"amenity_name": exists.name})
+            return exists
+        else:
+            raise HTTPException(status_code=400, detail="Esta amenidad ya existe.")
+    
+    new_amenity = Amenity(name=data.name, icon=data.icon, category_id=data.category_id)
+    db.add(new_amenity)
+    db.commit()
+    db.refresh(new_amenity)
+    
+    log_action(db, user_id=current_user.id, resource="amenities", action="create",
+               method="POST", path="/admin/amenities", status_code=201, request=request,
+               metadata={"amenity_name": new_amenity.name})
+    return new_amenity
+
+@router.put("/amenities/{amenity_id}", response_model=AmenityRead, dependencies=[Depends(require_permission("rooms", "update"))])
+def update_admin_amenity(
+    amenity_id: int,
+    data: AmenityUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    amenity = db.query(Amenity).filter(Amenity.id == amenity_id, Amenity.is_deleted == False).first()
+    if not amenity:
+        raise HTTPException(status_code=404, detail="Amenidad no encontrada")
+    
+    if data.name is not None:
+        # Check for duplicate name
+        dup = db.query(Amenity).filter(Amenity.name == data.name, Amenity.id != amenity_id, Amenity.is_deleted == False).first()
+        if dup:
+            raise HTTPException(status_code=400, detail="Ya existe una amenidad con ese nombre.")
+        amenity.name = data.name
+    if data.icon is not None:
+        amenity.icon = data.icon
+    if data.category_id is not None:
+        amenity.category_id = data.category_id
+    
+    db.commit()
+    db.refresh(amenity)
+    
+    log_action(db, user_id=current_user.id, resource="amenities", action="update",
+               method="PUT", path=f"/admin/amenities/{amenity_id}", status_code=200, request=request,
+               metadata={"amenity_id": amenity_id})
+    return amenity
+
+@router.delete("/amenities/{amenity_id}", dependencies=[Depends(require_permission("rooms", "delete"))])
+def delete_admin_amenity(
+    amenity_id: int,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    amenity = db.query(Amenity).filter(Amenity.id == amenity_id).first()
+    if not amenity:
+        raise HTTPException(status_code=404, detail="Amenidad no encontrada")
+    
+    amenity.is_deleted = True
+    db.commit()
+    
+    log_action(db, user_id=current_user.id, resource="amenities", action="delete",
+               method="DELETE", path=f"/admin/amenities/{amenity_id}", status_code=200, request=request,
+               metadata={"deleted_amenity": amenity.name})
+    return {"message": "Amenidad eliminada exitosamente"}
 
 # ----- Room Types Catalog -----
 
@@ -1276,3 +1675,597 @@ def list_audit_logs(
     if user_id is not None:
         q = q.filter(AuditLog.user_id == user_id)
     return q.offset(offset).limit(limit).all()
+
+
+# ────────────────────────────────────────────────────────────────
+# Notification Settings (configuración global de notificaciones)
+# ────────────────────────────────────────────────────────────────
+from app.schemas.notification import NotificationSettingRead, NotificationSettingUpdate
+from app.services import notification_service as notif_svc
+
+
+@router.get("/notification-settings", response_model=list[NotificationSettingRead], dependencies=[Depends(require_permission("admin", "read"))])
+def list_notification_settings(
+    db: Session = Depends(get_db),
+):
+    """Lista todas las configuraciones del sistema de notificaciones."""
+    return notif_svc.get_all_settings(db)
+
+
+@router.put("/notification-settings/{key}", response_model=NotificationSettingRead, dependencies=[Depends(require_permission("admin", "update"))])
+def update_notification_setting(
+    key: str,
+    body: NotificationSettingUpdate,
+    db: Session = Depends(get_db),
+):
+    """Actualiza una configuración del sistema de notificaciones."""
+    updated = notif_svc.update_setting(db, key, body.value)
+    if not updated:
+        raise HTTPException(status_code=404, detail=f"Setting '{key}' no encontrado.")
+    return updated
+
+
+# ═══════════════════════════════════════════════════════════════
+# AMENIDADES EXTRAS CON COSTO
+# ═══════════════════════════════════════════════════════════════
+from app.models.extra_amenity import ExtraAmenityCategory, ExtraAmenity, ReservationExtraAmenity
+from app.schemas.extra_amenity import (
+    ExtraAmenityCategoryCreate, ExtraAmenityCategoryUpdate, ExtraAmenityCategoryRead,
+    ExtraAmenityCreate, ExtraAmenityUpdate, ExtraAmenityRead,
+    ReservationExtraCreate, ReservationExtraRead
+)
+
+# ── Categorías ────────────────────────────────────────────────
+
+@router.get("/extra-amenity-categories", response_model=list[ExtraAmenityCategoryRead],
+            dependencies=[Depends(require_permission("admin", "read"))])
+def list_extra_amenity_categories(db: Session = Depends(get_db)):
+    return db.query(ExtraAmenityCategory).filter(ExtraAmenityCategory.is_deleted == False).order_by(ExtraAmenityCategory.name).all()
+
+@router.post("/extra-amenity-categories", response_model=ExtraAmenityCategoryRead, status_code=201,
+             dependencies=[Depends(require_permission("admin", "create"))])
+def create_extra_amenity_category(body: ExtraAmenityCategoryCreate, db: Session = Depends(get_db)):
+    existing = db.query(ExtraAmenityCategory).filter(ExtraAmenityCategory.name == body.name, ExtraAmenityCategory.is_deleted == False).first()
+    if existing:
+        raise HTTPException(status_code=409, detail="Ya existe una categoría con ese nombre.")
+    cat = ExtraAmenityCategory(**body.model_dump())
+    db.add(cat)
+    db.commit()
+    db.refresh(cat)
+    return cat
+
+@router.patch("/extra-amenity-categories/{cat_id}", response_model=ExtraAmenityCategoryRead,
+              dependencies=[Depends(require_permission("admin", "update"))])
+def update_extra_amenity_category(cat_id: int, body: ExtraAmenityCategoryUpdate, db: Session = Depends(get_db)):
+    cat = db.query(ExtraAmenityCategory).filter(ExtraAmenityCategory.id == cat_id, ExtraAmenityCategory.is_deleted == False).first()
+    if not cat:
+        raise HTTPException(status_code=404, detail="Categoría no encontrada.")
+    for field, val in body.model_dump(exclude_unset=True).items():
+        setattr(cat, field, val)
+    db.commit()
+    db.refresh(cat)
+    return cat
+
+@router.delete("/extra-amenity-categories/{cat_id}", status_code=204,
+               dependencies=[Depends(require_permission("admin", "delete"))])
+def delete_extra_amenity_category(cat_id: int, db: Session = Depends(get_db)):
+    cat = db.query(ExtraAmenityCategory).filter(ExtraAmenityCategory.id == cat_id, ExtraAmenityCategory.is_deleted == False).first()
+    if not cat:
+        raise HTTPException(status_code=404, detail="Categoría no encontrada.")
+    cat.is_deleted = True
+    db.commit()
+
+# ── Catálogo de Extras ────────────────────────────────────────
+
+@router.get("/extra-amenities", response_model=list[ExtraAmenityRead],
+            dependencies=[Depends(require_permission("admin", "read"))])
+def list_extra_amenities(include_inactive: bool = False, db: Session = Depends(get_db)):
+    q = db.query(ExtraAmenity).filter(ExtraAmenity.is_deleted == False)
+    if not include_inactive:
+        q = q.filter(ExtraAmenity.is_active == True)
+    return q.order_by(ExtraAmenity.name).all()
+
+@router.post("/extra-amenities", response_model=ExtraAmenityRead, status_code=201,
+             dependencies=[Depends(require_permission("admin", "create"))])
+def create_extra_amenity(body: ExtraAmenityCreate, db: Session = Depends(get_db)):
+    extra = ExtraAmenity(**body.model_dump())
+    db.add(extra)
+    db.commit()
+    db.refresh(extra)
+    return extra
+
+@router.post("/extra-amenities/{extra_id}/upload-image", response_model=ExtraAmenityRead,
+             dependencies=[Depends(require_permission("admin", "update"))])
+def upload_extra_amenity_image(extra_id: int, file: UploadFile = File(...), db: Session = Depends(get_db)):
+    extra = db.query(ExtraAmenity).filter(ExtraAmenity.id == extra_id, ExtraAmenity.is_deleted == False).first()
+    if not extra:
+        raise HTTPException(status_code=404, detail="Extra no encontrado.")
+    extra.image_url = upload_image_to_cloudinary(file)
+    db.commit()
+    db.refresh(extra)
+    return extra
+
+@router.patch("/extra-amenities/{extra_id}", response_model=ExtraAmenityRead,
+              dependencies=[Depends(require_permission("admin", "update"))])
+def update_extra_amenity(extra_id: int, body: ExtraAmenityUpdate, db: Session = Depends(get_db)):
+    extra = db.query(ExtraAmenity).filter(ExtraAmenity.id == extra_id, ExtraAmenity.is_deleted == False).first()
+    if not extra:
+        raise HTTPException(status_code=404, detail="Extra no encontrado.")
+    for field, val in body.model_dump(exclude_unset=True).items():
+        setattr(extra, field, val)
+    db.commit()
+    db.refresh(extra)
+    return extra
+
+@router.delete("/extra-amenities/{extra_id}", status_code=204,
+               dependencies=[Depends(require_permission("admin", "delete"))])
+def delete_extra_amenity(extra_id: int, db: Session = Depends(get_db)):
+    extra = db.query(ExtraAmenity).filter(ExtraAmenity.id == extra_id, ExtraAmenity.is_deleted == False).first()
+    if not extra:
+        raise HTTPException(status_code=404, detail="Extra no encontrado.")
+    extra.is_deleted = True
+    db.commit()
+
+# ── Extras en Reservaciones (flujo Admin) ────────────────────
+
+@router.post("/reservations/{res_id}/extras", response_model=ReservationExtraRead, status_code=201,
+             dependencies=[Depends(require_permission("admin", "create"))])
+def add_extra_to_reservation(res_id: int, body: ReservationExtraCreate, db: Session = Depends(get_db)):
+    """
+    Agrega un servicio extra a una reservación existente.
+    DISEÑO: NO modifica reservation.total_cost ni reservation.status.
+    El extra tiene su propio payment_status independiente.
+    """
+    reservation = db.query(Reservation).filter(Reservation.id == res_id, Reservation.is_deleted == False).first()
+    if not reservation:
+        raise HTTPException(status_code=404, detail="Reservación no encontrada.")
+    if reservation.status == "cancelled":
+        raise HTTPException(status_code=400, detail="No se pueden agregar extras a una reservación cancelada.")
+
+    extra = db.query(ExtraAmenity).filter(ExtraAmenity.id == body.extra_amenity_id, ExtraAmenity.is_active == True, ExtraAmenity.is_deleted == False).first()
+    if not extra:
+        raise HTTPException(status_code=404, detail="Amenidad extra no encontrada o inactiva.")
+
+    from decimal import Decimal
+    unit_price = Decimal(str(extra.price))
+    quantity = body.quantity
+    total_price = unit_price * quantity
+
+    pivot = ReservationExtraAmenity(
+        reservation_id=res_id,
+        extra_amenity_id=extra.id,
+        quantity=quantity,
+        unit_price=unit_price,
+        total_price=total_price,
+        payment_status="pending",
+        notes=body.notes
+    )
+    db.add(pivot)
+
+    # Actualizar extras_total (NO afecta total_cost ni status)
+    from sqlalchemy import func as sqlfunc
+    db.flush()
+    new_extras_total = db.query(sqlfunc.sum(ReservationExtraAmenity.total_price)).filter(
+        ReservationExtraAmenity.reservation_id == res_id
+    ).scalar() or Decimal("0")
+    reservation.extras_total = new_extras_total
+
+    db.commit()
+    db.refresh(pivot)
+    return pivot
+
+@router.delete("/reservations/{res_id}/extras/{pivot_id}", status_code=204,
+               dependencies=[Depends(require_permission("admin", "delete"))])
+def remove_extra_from_reservation(res_id: int, pivot_id: int, db: Session = Depends(get_db)):
+    """Quita un extra de una reservación y recalcula extras_total."""
+    pivot = db.query(ReservationExtraAmenity).filter(
+        ReservationExtraAmenity.id == pivot_id,
+        ReservationExtraAmenity.reservation_id == res_id
+    ).first()
+    if not pivot:
+        raise HTTPException(status_code=404, detail="Extra no encontrado en esta reservación.")
+    if pivot.payment_status == "paid":
+        raise HTTPException(status_code=400, detail="No se puede eliminar un extra ya pagado.")
+
+    db.delete(pivot)
+
+    from decimal import Decimal
+    from sqlalchemy import func as sqlfunc
+    db.flush()
+    new_extras_total = db.query(sqlfunc.sum(ReservationExtraAmenity.total_price)).filter(
+        ReservationExtraAmenity.reservation_id == res_id
+    ).scalar() or Decimal("0")
+
+    reservation = db.query(Reservation).filter(Reservation.id == res_id).first()
+    if reservation:
+        reservation.extras_total = new_extras_total
+
+    db.commit()
+
+@router.patch("/reservations/{res_id}/extras/{pivot_id}/pay", response_model=ReservationExtraRead,
+              dependencies=[Depends(require_permission("admin", "update"))])
+def mark_extra_as_paid(res_id: int, pivot_id: int, db: Session = Depends(get_db)):
+    """
+    Marca un extra como pagado.
+    IMPORTANTE: Nunca modifica reservation.status.
+    """
+    pivot = db.query(ReservationExtraAmenity).filter(
+        ReservationExtraAmenity.id == pivot_id,
+        ReservationExtraAmenity.reservation_id == res_id
+    ).first()
+    if not pivot:
+        raise HTTPException(status_code=404, detail="Extra no encontrado.")
+    if pivot.payment_status == "paid":
+        raise HTTPException(status_code=400, detail="Este extra ya está marcado como pagado.")
+
+    pivot.payment_status = "paid"
+    db.commit()
+    db.refresh(pivot)
+    return pivot
+
+
+# ----- Incidental Charges & Categories -----
+
+from app.models.incidental_charge import IncidentalChargeCategory, IncidentalCharge
+from app.schemas.incidental_charge import (
+    IncidentalChargeCategoryRead,
+    IncidentalChargeCategoryCreate,
+    IncidentalChargeCategoryUpdate,
+    IncidentalChargeRead,
+    IncidentalChargeCreate,
+    IncidentalChargeUpdate,
+    IncidentalChargeWaive
+)
+
+def recalculate_reservation_incidentals_total(reservation: Reservation, db: Session):
+    from sqlalchemy import func
+    from decimal import Decimal
+    total = db.query(func.sum(IncidentalCharge.total_amount)).filter(
+        IncidentalCharge.reservation_id == reservation.id,
+        IncidentalCharge.payment_status != "waived"
+    ).scalar() or Decimal("0")
+    reservation.incidentals_total = total
+    db.flush()
+    return total
+
+@router.get("/incidental-categories", response_model=list[IncidentalChargeCategoryRead], dependencies=[Depends(require_permission("incidentals", "read"))])
+def get_admin_incidental_categories(db: Session = Depends(get_db)):
+    """Lista todas las categorías de cargos incidentales no eliminadas."""
+    return db.query(IncidentalChargeCategory).filter(IncidentalChargeCategory.is_deleted == False).order_by(IncidentalChargeCategory.name).all()
+
+@router.post("/incidental-categories", response_model=IncidentalChargeCategoryRead, status_code=201, dependencies=[Depends(require_permission("incidentals", "create"))])
+def create_admin_incidental_category(
+    data: IncidentalChargeCategoryCreate,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Crea una nueva categoría de cargo incidental."""
+    exists = db.query(IncidentalChargeCategory).filter(IncidentalChargeCategory.name == data.name).first()
+    if exists:
+        if exists.is_deleted:
+            exists.is_deleted = False
+            exists.description = data.description
+            exists.icon = data.icon
+            exists.is_active = True
+            db.commit()
+            db.refresh(exists)
+            log_action(db, user_id=current_user.id, resource="incidental_charge_categories", action="create (reactivated)",
+                       method="POST", path="/admin/incidental-categories", status_code=201, request=request,
+                       metadata={"category_name": exists.name})
+            return exists
+        else:
+            raise HTTPException(status_code=400, detail="Esta categoría ya existe.")
+    
+    new_cat = IncidentalChargeCategory(
+        name=data.name,
+        description=data.description,
+        icon=data.icon
+    )
+    db.add(new_cat)
+    db.commit()
+    db.refresh(new_cat)
+    
+    log_action(db, user_id=current_user.id, resource="incidental_charge_categories", action="create",
+               method="POST", path="/admin/incidental-categories", status_code=201, request=request,
+               metadata={"category_name": new_cat.name})
+    return new_cat
+
+@router.put("/incidental-categories/{category_id}", response_model=IncidentalChargeCategoryRead, dependencies=[Depends(require_permission("incidentals", "update"))])
+def update_admin_incidental_category(
+    category_id: int,
+    data: IncidentalChargeCategoryUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Actualiza una categoría de cargo incidental."""
+    cat = db.query(IncidentalChargeCategory).filter(IncidentalChargeCategory.id == category_id, IncidentalChargeCategory.is_deleted == False).first()
+    if not cat:
+        raise HTTPException(status_code=404, detail="Categoría no encontrada")
+    
+    if data.name is not None:
+        dup = db.query(IncidentalChargeCategory).filter(
+            IncidentalChargeCategory.name == data.name,
+            IncidentalChargeCategory.id != category_id,
+            IncidentalChargeCategory.is_deleted == False
+        ).first()
+        if dup:
+            raise HTTPException(status_code=400, detail="Ya existe otra categoría con ese nombre.")
+        cat.name = data.name
+        
+    if data.description is not None:
+        cat.description = data.description
+    if data.icon is not None:
+        cat.icon = data.icon
+    if data.is_active is not None:
+        cat.is_active = data.is_active
+        
+    db.commit()
+    db.refresh(cat)
+    log_action(db, user_id=current_user.id, resource="incidental_charge_categories", action="update",
+               method="PUT", path=f"/admin/incidental-categories/{category_id}", status_code=200, request=request,
+               metadata={"category_id": category_id})
+    return cat
+
+@router.delete("/incidental-categories/{category_id}", status_code=204, dependencies=[Depends(require_permission("incidentals", "delete"))])
+def delete_admin_incidental_category(
+    category_id: int,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Elimina lógicamente una categoría de cargo incidental."""
+    cat = db.query(IncidentalChargeCategory).filter(IncidentalChargeCategory.id == category_id, IncidentalChargeCategory.is_deleted == False).first()
+    if not cat:
+        raise HTTPException(status_code=404, detail="Categoría no encontrada")
+    
+    cat.is_deleted = True
+    db.commit()
+    log_action(db, user_id=current_user.id, resource="incidental_charge_categories", action="delete",
+               method="DELETE", path=f"/admin/incidental-categories/{category_id}", status_code=204, request=request,
+               metadata={"category_id": category_id})
+
+@router.get("/incidentals", response_model=list[IncidentalChargeRead], dependencies=[Depends(require_permission("incidentals", "read"))])
+def get_all_incidental_charges(db: Session = Depends(get_db)):
+    """Lista todos los cargos incidentales registrados en el sistema, ordenados por más recientes."""
+    return db.query(IncidentalCharge).options(
+        selectinload(IncidentalCharge.created_by),
+        selectinload(IncidentalCharge.category),
+        selectinload(IncidentalCharge.reservation)
+    ).order_by(IncidentalCharge.created_at.desc()).all()
+
+@router.get("/reservations/{res_id}/incidentals", response_model=list[IncidentalChargeRead], dependencies=[Depends(require_permission("incidentals", "read"))])
+def get_reservation_incidental_charges(res_id: int, db: Session = Depends(get_db)):
+    """Lista todos los cargos incidentales asociados a una reservación, cargando el staff que lo registró y la categoría."""
+    return db.query(IncidentalCharge).options(
+        selectinload(IncidentalCharge.created_by),
+        selectinload(IncidentalCharge.category)
+    ).filter(IncidentalCharge.reservation_id == res_id).order_by(IncidentalCharge.created_at.desc()).all()
+
+@router.post("/reservations/{res_id}/incidentals", response_model=IncidentalChargeRead, status_code=201, dependencies=[Depends(require_permission("incidentals", "create"))])
+def create_reservation_incidental_charge(
+    res_id: int,
+    data: IncidentalChargeCreate,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Registra un nuevo cargo incidental a una reservación.
+    Recalcula incidentals_total y envía una notificación.
+    """
+    reservation = db.query(Reservation).filter(Reservation.id == res_id, Reservation.is_deleted == False).first()
+    if not reservation:
+        raise HTTPException(status_code=404, detail="Reservación no encontrada")
+        
+    if reservation.status == "cancelled":
+        raise HTTPException(status_code=400, detail="No se pueden agregar cargos incidentales a una reservación cancelada")
+        
+    if data.category_id:
+        category = db.query(IncidentalChargeCategory).filter(
+            IncidentalChargeCategory.id == data.category_id,
+            IncidentalChargeCategory.is_deleted == False
+        ).first()
+        if not category:
+            raise HTTPException(status_code=400, detail="Categoría seleccionada no es válida o está inactiva")
+
+    total_amount = data.amount * data.quantity
+
+    new_charge = IncidentalCharge(
+        reservation_id=res_id,
+        category_id=data.category_id,
+        description=data.description,
+        amount=data.amount,
+        quantity=data.quantity,
+        total_amount=total_amount,
+        apply_tax=data.apply_tax,
+        payment_status="pending",
+        notes=data.notes,
+        created_by_user_id=current_user.id
+    )
+    
+    db.add(new_charge)
+    db.flush() # Para obtener el ID del cargo incidental
+    
+    # Recalculamos
+    recalculate_reservation_incidentals_total(reservation, db)
+    db.commit()
+    db.refresh(new_charge)
+    
+    # Notificación in-app
+    try:
+        from app.services.notification_service import notify_incidental_charge_created
+        notify_incidental_charge_created(db, reservation, new_charge)
+    except Exception as e:
+        print(f"Error al enviar notificación de cargo incidental: {e}")
+        
+    log_action(db, user_id=current_user.id, resource="incidental_charges", action="create",
+               method="POST", path=f"/admin/reservations/{res_id}/incidentals", status_code=201, request=request,
+               metadata={"reservation_id": res_id, "charge_id": new_charge.id, "total_amount": float(total_amount)})
+               
+    return new_charge
+
+@router.put("/incidentals/{charge_id}", response_model=IncidentalChargeRead, dependencies=[Depends(require_permission("incidentals", "update"))])
+def update_reservation_incidental_charge(
+    charge_id: int,
+    data: IncidentalChargeUpdate,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Actualiza los datos de un cargo incidental. Solo se permite si el cargo está en estado 'pending'.
+    Recalcula el total de la reservación.
+    """
+    charge = db.query(IncidentalCharge).filter(IncidentalCharge.id == charge_id).first()
+    if not charge:
+        raise HTTPException(status_code=404, detail="Cargo incidental no encontrado")
+        
+    if charge.payment_status != "pending":
+        raise HTTPException(status_code=400, detail="Solo se pueden editar cargos incidentales que estén pendientes de pago")
+        
+    reservation = db.query(Reservation).filter(Reservation.id == charge.reservation_id).first()
+    if not reservation:
+        raise HTTPException(status_code=404, detail="Reservación no encontrada")
+        
+    if data.category_id is not None:
+        category = db.query(IncidentalChargeCategory).filter(
+            IncidentalChargeCategory.id == data.category_id,
+            IncidentalChargeCategory.is_deleted == False
+        ).first()
+        if not category:
+            raise HTTPException(status_code=400, detail="Categoría seleccionada no es válida o está inactiva")
+        charge.category_id = data.category_id
+        
+    if data.description is not None:
+        charge.description = data.description
+        
+    if data.amount is not None:
+        charge.amount = data.amount
+        
+    if data.quantity is not None:
+        charge.quantity = data.quantity
+        
+    if data.apply_tax is not None:
+        charge.apply_tax = data.apply_tax
+        
+    if data.notes is not None:
+        charge.notes = data.notes
+        
+    # Recalculamos total del cargo
+    charge.total_amount = charge.amount * charge.quantity
+    db.flush()
+    
+    # Recalculamos total de la reservación
+    recalculate_reservation_incidentals_total(reservation, db)
+    db.commit()
+    db.refresh(charge)
+    
+    log_action(db, user_id=current_user.id, resource="incidental_charges", action="update",
+               method="PUT", path=f"/admin/incidentals/{charge_id}", status_code=200, request=request,
+               metadata={"charge_id": charge_id, "reservation_id": reservation.id})
+               
+    return charge
+
+@router.post("/incidentals/{charge_id}/waive", response_model=IncidentalChargeRead, dependencies=[Depends(require_permission("incidentals", "update"))])
+def waive_reservation_incidental_charge(
+    charge_id: int,
+    data: IncidentalChargeWaive,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Condonar un cargo incidental (cortesía o error de registro). El estado cambia a 'waived'.
+    Se requiere un motivo obligatorio. Recalcula el total de la reservación (los waived no suman) y notifica.
+    """
+    charge = db.query(IncidentalCharge).filter(IncidentalCharge.id == charge_id).first()
+    if not charge:
+        raise HTTPException(status_code=404, detail="Cargo incidental no encontrado")
+        
+    if charge.payment_status != "pending":
+        raise HTTPException(status_code=400, detail="Solo se pueden condonar cargos incidentales que estén pendientes de pago")
+        
+    reservation = db.query(Reservation).filter(Reservation.id == charge.reservation_id).first()
+    if not reservation:
+        raise HTTPException(status_code=404, detail="Reservación no encontrada")
+        
+    charge.payment_status = "waived"
+    charge.waived_reason = data.reason
+    db.flush()
+    
+    # Recalculamos total de la reservación
+    recalculate_reservation_incidentals_total(reservation, db)
+    db.commit()
+    db.refresh(charge)
+    
+    # Notificación in-app
+    try:
+        from app.services.notification_service import notify_incidental_charge_waived
+        notify_incidental_charge_waived(db, reservation, charge)
+    except Exception as e:
+        print(f"Error al enviar notificación de cargo condonado: {e}")
+        
+    log_action(db, user_id=current_user.id, resource="incidental_charges", action="waive",
+               method="POST", path=f"/admin/incidentals/{charge_id}/waive", status_code=200, request=request,
+               metadata={"charge_id": charge_id, "reservation_id": reservation.id, "reason": data.reason})
+               
+    return charge
+
+@router.delete("/incidentals/{charge_id}", status_code=204, dependencies=[Depends(require_permission("incidentals", "delete"))])
+def delete_reservation_incidental_charge(
+    charge_id: int,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """
+    Elimina físicamente un cargo incidental de la base de datos si y solo si está en estado 'pending'.
+    Recalcula el total de la reservación.
+    """
+    charge = db.query(IncidentalCharge).filter(IncidentalCharge.id == charge_id).first()
+    if not charge:
+        raise HTTPException(status_code=404, detail="Cargo incidental no encontrado")
+        
+    if charge.payment_status != "pending":
+        raise HTTPException(status_code=400, detail="Solo se pueden eliminar cargos incidentales que estén pendientes de pago")
+        
+    reservation = db.query(Reservation).filter(Reservation.id == charge.reservation_id).first()
+    if not reservation:
+        raise HTTPException(status_code=404, detail="Reservación no encontrada")
+        
+    db.delete(charge)
+    db.flush()
+    
+    # Recalculamos total de la reservación
+    recalculate_reservation_incidentals_total(reservation, db)
+    db.commit()
+    
+    log_action(db, user_id=current_user.id, resource="incidental_charges", action="delete",
+               method="DELETE", path=f"/admin/incidentals/{charge_id}", status_code=204, request=request,
+               metadata={"charge_id": charge_id, "reservation_id": reservation.id})
+
+@router.post("/incidentals/{charge_id}/evidence", response_model=IncidentalChargeRead, dependencies=[Depends(require_permission("incidentals", "update"))])
+def upload_incidental_evidence(
+    charge_id: int,
+    file: UploadFile = File(...),
+    current_user: User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Sube una foto/evidencia del daño a Cloudinary y la asocia al cargo incidental."""
+    charge = db.query(IncidentalCharge).filter(IncidentalCharge.id == charge_id).first()
+    if not charge:
+        raise HTTPException(status_code=404, detail="Cargo incidental no encontrado")
+        
+    if charge.payment_status != "pending":
+        raise HTTPException(status_code=400, detail="Solo se puede subir evidencia para cargos incidentales pendientes de pago")
+        
+    # Subir imagen a Cloudinary usando la función utilitaria
+    evidence_url = upload_image_to_cloudinary(file)
+    charge.evidence_url = evidence_url
+    db.commit()
+    db.refresh(charge)
+    
+    return charge
+

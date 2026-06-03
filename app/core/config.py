@@ -42,4 +42,7 @@ class Settings:
     # Payment Expiration Settings (in hours)
     PENDING_RESERVATION_TIMEOUT_HOURS: int = int(os.getenv("PENDING_RESERVATION_TIMEOUT_HOURS", "24"))
 
+    # Notification Settings
+    NOTIFICATION_RETENTION_DAYS: int = int(os.getenv("NOTIFICATION_RETENTION_DAYS", "90"))
+
 settings = Settings()

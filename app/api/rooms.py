@@ -11,12 +11,55 @@ from app.db.session import get_db
 from app.models.room import Room, SeasonPrice, RoomImage, RoomBasePriceHistory
 from app.models.room_type import RoomType
 from app.models.reservation import Reservation
+from app.models.amenity import Amenity
 from app.schemas.room import RoomRead, RoomSearchResponse, RoomCreate, RoomUpdate, RoomPriceHistoryResponse
+from app.schemas.amenity import AmenityRead
 
 from app.services.reservation_service import calculate_price
 from app.services.room_service import create_room as service_create_room, update_room as service_update_room
 
 router = APIRouter(prefix="/rooms", tags=["Rooms"])
+
+@router.get("/occupancy-today", response_model=List[int], dependencies=[Depends(require_permission("rooms", "read"))])
+def get_occupied_rooms_today(db: Session = Depends(get_db)):
+    from app.utils.date_utils import get_el_salvador_now
+    from app.services import system_settings_service as sss
+    from datetime import time, datetime
+
+    checkin_time = sss.get_checkin_time(db)
+    checkout_time = sss.get_checkout_time(db)
+
+    try:
+        ci_h, ci_m = map(int, checkin_time.split(":"))
+        checkin_t = time(ci_h, ci_m)
+    except Exception:
+        checkin_t = time(15, 0)
+
+    try:
+        co_h, co_m = map(int, checkout_time.split(":"))
+        checkout_t = time(co_h, co_m)
+    except Exception:
+        checkout_t = time(11, 0)
+
+    now_local = get_el_salvador_now().replace(tzinfo=None)
+    today = now_local.date()
+
+    # Obtener reservas activas que tocan el día de hoy
+    reservations = db.query(Reservation).filter(
+        Reservation.status.in_(["pending", "verifying", "confirmed"]),
+        Reservation.is_deleted == False,
+        Reservation.check_in <= today,
+        Reservation.check_out >= today
+    ).all()
+
+    occupied_room_ids = set()
+    for res in reservations:
+        start_dt = datetime.combine(res.check_in, checkin_t)
+        end_dt = datetime.combine(res.check_out, checkout_t)
+        if start_dt <= now_local < end_dt:
+            occupied_room_ids.add(res.room_id)
+
+    return list(occupied_room_ids)
 
 @router.get("/search", response_model=List[RoomSearchResponse])
 def search_rooms(
@@ -56,7 +99,7 @@ def search_rooms(
         if room.id in occupied_room_ids:
             continue
             
-        price_data = calculate_price(room, check_in, check_out)
+        price_data = calculate_price(db, room, check_in, check_out)
         results.append(
             RoomSearchResponse(
                 room=room,
@@ -76,7 +119,7 @@ def get_public_rooms(db: Session = Depends(get_db)):
         selectinload(Room.amenities),
         selectinload(Room.images),
         selectinload(Room.season_prices)
-    ).filter(Room.is_active == True, Room.is_deleted == False).limit(6).all()
+    ).filter(Room.is_active == True, Room.is_deleted == False).order_by(Room.number).all()
     
     for r in rooms:
         r.season_prices = [sp for sp in r.season_prices if not sp.is_archived]
@@ -89,6 +132,11 @@ def get_public_room_types(db: Session = Depends(get_db)):
         RoomType.is_deleted == False
     ).all()
     return [t[0] for t in types]
+
+@router.get("/amenities", response_model=List[AmenityRead])
+def get_public_amenities(db: Session = Depends(get_db)):
+    """Public endpoint: list all active amenities for catalog display/filtering."""
+    return db.query(Amenity).filter(Amenity.is_deleted == False).order_by(Amenity.category_id, Amenity.name).all()
 
 @router.get("/{room_id}", response_model=RoomRead)
 def get_room(room_id: int, db: Session = Depends(get_db)):

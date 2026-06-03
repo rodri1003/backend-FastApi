@@ -13,6 +13,8 @@ from app.models import room as room_models
 from app.models import reservation as reservation_models
 from app.models import payment as payment_models
 from app.models import room_type as room_type_models
+from app.models import notification as notification_models
+from app.models import extra_amenity as extra_amenity_models  # Amenidades extras con costo
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.
