@@ -1,10 +1,17 @@
-from sqlalchemy import create_engine, text
-from urllib.parse import quote_plus
 import os
+import sys
 from pathlib import Path
 from dotenv import load_dotenv
+from sqlalchemy import create_engine, text
+from urllib.parse import quote_plus
 
-env_path = Path(".env")
+# Add parent directory to sys.path
+parent_dir = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if parent_dir not in sys.path:
+    sys.path.insert(0, parent_dir)
+
+# Load environment variables from parent folder .env
+env_path = Path(parent_dir) / ".env"
 load_dotenv(dotenv_path=env_path)
 
 DB_SERVER = os.getenv("DB_SERVER", r"localhost\SQLEXPRESS")
