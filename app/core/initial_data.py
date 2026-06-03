@@ -36,6 +36,16 @@ def init_rbac_data() -> None:
             name="cliente",
             description="Usuario estándar",
         )
+        gerente_role = _get_or_create_role(
+            db,
+            name="gerente",
+            description="Gerente de hotel",
+        )
+        recepcionista_role = _get_or_create_role(
+            db,
+            name="recepcionista",
+            description="Personal de recepción",
+        )
 
         # Usuario administrador inicial
         admin_email = "admin@example.com"
@@ -79,7 +89,7 @@ def init_rbac_data() -> None:
             )
 
         # Inicializar recursos de permisos estándar
-        resources = ["users", "rooms", "reservations", "roles", "permissions", "audit_logs", "payments"]
+        resources = ["users", "rooms", "reservations", "roles", "permissions", "audit_logs", "payments", "settings", "incidentals"]
         for res_name in resources:
             if not db.query(PermissionResource).filter(PermissionResource.name == res_name).first():
                 db.add(PermissionResource(name=res_name))
@@ -115,7 +125,15 @@ def _init_casbin_policies() -> None:
     if not enforcer.has_policy("admin", "*", "*"):
         enforcer.add_policy("admin", "*", "*")
 
-   
+    # gerente -> incidentals:create, incidentals:read, incidentals:update
+    for action in ["create", "read", "update"]:
+        if not enforcer.has_policy("gerente", "incidentals", action):
+            enforcer.add_policy("gerente", "incidentals", action)
+
+    # recepcionista -> incidentals:create, incidentals:read
+    for action in ["create", "read"]:
+        if not enforcer.has_policy("recepcionista", "incidentals", action):
+            enforcer.add_policy("recepcionista", "incidentals", action)
 
     enforcer.save_policy()
 

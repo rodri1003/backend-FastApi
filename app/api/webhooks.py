@@ -12,7 +12,7 @@ import hashlib
 from app.core.config import settings
 from app.core.logging_utils import mask_pii
 from fastapi import BackgroundTasks
-from app.core.mail import send_reservation_confirmed_email
+from app.core.mail import send_reservation_confirmed_email, send_payment_receipt_email
 from app.services.pdf_service import generate_receipt_pdf
 from app.services.dte_json_service import generate_dte_json
 
@@ -88,10 +88,21 @@ async def wompi_webhook(
         
     # Wompi SV retorna "ExitosaAprobada"
     if tx_status in ["ExitosaAprobada", "APPROVED", "COMPLETED", "EXITOSO"]:
+        from sqlalchemy.orm import selectinload
+        from app.models.extra_amenity import ReservationExtraAmenity
+        from app.models.incidental_charge import IncidentalCharge
         # Buscar la reservación previniendo errores de casteo a entero si es un string (e.g UUID)
-        query = db.query(Reservation).filter(Reservation.unique_id == str(reference))
+        query = db.query(Reservation).options(
+            selectinload(Reservation.room),
+            selectinload(Reservation.extras).selectinload(ReservationExtraAmenity.extra_amenity),
+            selectinload(Reservation.incidental_charges)
+        ).filter(Reservation.unique_id == str(reference))
         if str(reference).isdigit():
-            query = db.query(Reservation).filter(
+            query = db.query(Reservation).options(
+                selectinload(Reservation.room),
+                selectinload(Reservation.extras).selectinload(ReservationExtraAmenity.extra_amenity),
+                selectinload(Reservation.incidental_charges)
+            ).filter(
                 (Reservation.unique_id == str(reference)) | (Reservation.id == int(reference))
             )
         res = query.first()
@@ -117,7 +128,14 @@ async def wompi_webhook(
             logger.info(f"Payment {gateway_id} already processed for reservation {res.id}")
             return {"status": "already_processed"}
 
-        actual_paid = amount if amount > 0 else res.total_cost
+        extras_base = float(res.extras_total)
+        extras_iva = extras_base * 0.13
+        
+        from decimal import Decimal as Dec2
+        from app.services.reservation_service import calculate_grand_total
+        grand_total = float(calculate_grand_total(res, db))
+
+        actual_paid = amount if amount > 0 else grand_total
 
         # Construir dirección completa y obtener datos del perfil
         profile = res.user.profile if (res.user and res.user.profile) else None
@@ -130,7 +148,25 @@ async def wompi_webhook(
         
         full_address = ", ".join(address_parts) if address_parts else "EL SALVADOR"
 
-        # Generar comprobante
+        # Generar comprobante de forma itemizada y dinámica
+        from app.services.system_settings_service import get_tax_iva, get_tax_tourism
+        from app.services.payment_allocation_service import allocate_payment_items
+        from decimal import Decimal
+        
+        iva_rate = float(get_tax_iva(db))
+        tourism_rate = float(get_tax_tourism(db))
+        allocated_items = allocate_payment_items(db, res, Decimal(str(actual_paid)))
+        
+        room_base = sum(item["total_amount"] for item in allocated_items if item["type"] == "room")
+        room_iva = sum(item["tax"] for item in allocated_items if item["type"] == "room")
+        room_tourism = sum(item["tourism"] for item in allocated_items if item["type"] == "room")
+        
+        extras_base_alloc = sum(item["total_amount"] for item in allocated_items if item["type"] == "extra")
+        extras_iva_alloc = sum(item["tax"] for item in allocated_items if item["type"] == "extra")
+        
+        incidentals_base_alloc = sum(item["total_amount"] for item in allocated_items if item["type"] == "incidental")
+        incidentals_iva_alloc = sum(item["tax"] for item in allocated_items if item["type"] == "incidental")
+
         receipt_data = {
             "company": "Hotel AFE",
             "date": datetime.now(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ'),
@@ -147,7 +183,19 @@ async def wompi_webhook(
             "check_out": res.check_out.isoformat() if res.check_out else "",
             "amount_paid": str(actual_paid),
             "method": payment_method.lower(),
-            "gateway_ref": gateway_id
+            "gateway_ref": gateway_id,
+            "tax_iva_rate": iva_rate,
+            "tax_tourism_rate": tourism_rate,
+            "room_base": float(room_base),
+            "room_iva": float(room_iva),
+            "room_tourism": float(room_tourism),
+            "extras_base": float(extras_base_alloc),
+            "extras_iva": float(extras_iva_alloc),
+            "incidentals_base": float(incidentals_base_alloc),
+            "incidentals_iva": float(incidentals_iva_alloc),
+            "items": allocated_items,
+            "extras": [ex for ex in allocated_items if ex["type"] == "extra"],
+            "incidentals": [inc for inc in allocated_items if inc["type"] == "incidental"]
         }
 
         # Grabar el pago real
@@ -160,30 +208,59 @@ async def wompi_webhook(
             receipt_data=receipt_data
         )
         db.add(new_payment)
-        
+
+        # Capturar estado previo antes de modificar
+        was_confirmed = res.status == "confirmed"
+
         from decimal import Decimal
         total_paid_before = sum([Decimal(str(p.amount)) for p in existing_payments if p.status == "completed"], Decimal("0.0"))
-        if total_paid_before + Decimal(str(actual_paid)) >= Decimal(str(res.total_cost)):
+        if total_paid_before + Decimal(str(actual_paid)) >= Decimal(str(round(grand_total, 2))):
             res.status = "confirmed"
-            
-            # Notificar al cliente tras éxito en Wompi
-            if res.user and res.user.email:
-                first_name = res.user.profile.first_name if (res.user.profile and res.user.profile.first_name) else "Cliente"
-                
-                # Generar PDF del DTE
-                try:
-                    pdf_content = generate_receipt_pdf(receipt_data)
-                except Exception as e:
-                    logger.error(f"Error generando PDF para reserva {res.unique_id} desde Webhook: {str(e)}")
-                    pdf_content = None
+            for extra in res.extras:
+                if extra.payment_status == "pending":
+                    extra.payment_status = "paid"
+            for inc in res.incidental_charges:
+                if inc.payment_status == "pending":
+                    inc.payment_status = "paid"
 
-                # Generar JSON del DTE
-                try:
-                    json_content = generate_dte_json(receipt_data)
-                except Exception as e:
-                    logger.error(f"Error generando JSON DTE para reserva {res.unique_id} desde Webhook: {str(e)}")
-                    json_content = None
+        db.commit()
+        logger.info(f"Successfully processed Wompi payment for reservation {res.id}")
 
+        # Notificar al cliente tras éxito en Wompi
+        if res.user and res.user.email:
+            from app.utils.date_utils import format_payment_datetime
+            first_name = res.user.profile.first_name if (res.user.profile and res.user.profile.first_name) else "Cliente"
+            payment_date_fmt = format_payment_datetime()
+
+            # Generar PDF del DTE
+            try:
+                pdf_content = generate_receipt_pdf(receipt_data)
+            except Exception as e:
+                logger.error(f"Error generando PDF para reserva {res.unique_id} desde Webhook: {str(e)}")
+                pdf_content = None
+
+            # Generar JSON del DTE
+            try:
+                json_content = generate_dte_json(receipt_data)
+            except Exception as e:
+                logger.error(f"Error generando JSON DTE para reserva {res.unique_id} desde Webhook: {str(e)}")
+                json_content = None
+
+            # SIEMPRE: enviar comprobante de pago con DTE
+            background_tasks.add_task(
+                send_payment_receipt_email,
+                email=res.user.email,
+                first_name=first_name,
+                reservation_id=res.unique_id,
+                payment_amount=f"{float(actual_paid):.2f}",
+                payment_method="online",
+                payment_date=payment_date_fmt,
+                pdf_content=pdf_content,
+                json_content=json_content
+            )
+
+            # SOLO si la reserva acaba de confirmarse por primera vez
+            if not was_confirmed and res.status == "confirmed":
                 background_tasks.add_task(
                     send_reservation_confirmed_email,
                     email=res.user.email,
@@ -194,8 +271,5 @@ async def wompi_webhook(
                     pdf_content=pdf_content,
                     json_content=json_content
                 )
-            
-        db.commit()
-        logger.info(f"Successfully processed Wompi payment for reservation {res.id}")
 
     return {"status": "received"}
