@@ -25,4 +25,21 @@ class Settings:
     WOMPI_API_SECRET: str = os.getenv("WOMPI_API_SECRET", "")
     NGROK_URL: str = os.getenv("NGROK_URL", "http://localhost:8000")
 
+    # Email Settings
+    MAIL_USERNAME: str = os.getenv("MAIL_USERNAME", "")
+    MAIL_PASSWORD: str = os.getenv("MAIL_PASSWORD", "")
+    MAIL_FROM: str = os.getenv("MAIL_FROM", "no-reply@hotel.com")
+    MAIL_PORT: int = int(os.getenv("MAIL_PORT", "587"))
+    MAIL_SERVER: str = os.getenv("MAIL_SERVER", "smtp.gmail.com")
+    MAIL_FROM_NAME: str = os.getenv("MAIL_FROM_NAME", "AFE Resort")
+    MAIL_STARTTLS: bool = os.getenv("MAIL_STARTTLS", "True").lower() == "true"
+    MAIL_SSL_TLS: bool = os.getenv("MAIL_SSL_TLS", "False").lower() == "true"
+
+    # Tax Settings
+    TAX_IVA: float = 0.13
+    TAX_TOURISM: float = 0.05
+
+    # Payment Expiration Settings (in hours)
+    PENDING_RESERVATION_TIMEOUT_HOURS: int = int(os.getenv("PENDING_RESERVATION_TIMEOUT_HOURS", "24"))
+
 settings = Settings()

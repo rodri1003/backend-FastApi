@@ -7,6 +7,7 @@ from sqlalchemy import (
     Integer,
     String,
     func,
+    text,
 )
 from sqlalchemy.orm import relationship
 
@@ -25,12 +26,12 @@ class User(Base):
     created_at = Column(
         DateTime(timezone=True),
         nullable=False,
-        server_default=func.now(),
+        server_default=text('GETUTCDATE()'),
     )
     updated_at = Column(
         DateTime(timezone=True),
         nullable=False,
-        server_default=func.now(),
+        server_default=text('GETUTCDATE()'),
         onupdate=func.now(),
     )
 
@@ -67,16 +68,27 @@ class UserProfile(Base):
     department = Column(String(100), nullable=True)
     municipality = Column(String(100), nullable=True)
     address_complement = Column(String(255), nullable=True)
+
+    # DTE / Fiscal Fields (El Salvador) / Identity
+    person_type = Column(String(20), nullable=True)  # Natural, Juridica
+    document_type = Column(String(50), nullable=True) # DUI, Pasaporte, Carnet de Residente
+    document_number = Column(String(50), nullable=True) # Document number corresponding to type
+    nrc = Column(String(50), nullable=True)          # Número de Registro de Contribuyente
+
+    nit = Column(String(20), nullable=True)          # Número de Identificación Tributaria
+    business_name = Column(String(200), nullable=True) # Razón Social o Nombre Comercial
+    economic_activity = Column(String(255), nullable=True) # Actividad Económica
+    taxpayer_type = Column(String(50), nullable=True) # Gran Contribuyente, Otros, etc.
     
     created_at = Column(
         DateTime(timezone=True),
         nullable=False,
-        server_default=func.now(),
+        server_default=text('GETUTCDATE()'),
     )
     updated_at = Column(
         DateTime(timezone=True),
         nullable=False,
-        server_default=func.now(),
+        server_default=text('GETUTCDATE()'),
         onupdate=func.now(),
     )
 

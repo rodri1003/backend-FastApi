@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from pydantic import BaseModel, Field
 
@@ -38,11 +38,30 @@ class SeasonPriceBase(BaseModel):
 class SeasonPriceCreate(SeasonPriceBase):
     pass
 
+class SeasonPriceUpdate(SeasonPriceBase):
+    id: int | None = None
+
 class SeasonPriceRead(SeasonPriceBase):
     id: int
+    created_at: datetime | str | None = None
+    is_archived: bool = False
+    snapshot_base_price: Decimal | None = None
 
     class Config:
         from_attributes = True
+
+class RoomBasePriceHistoryRead(BaseModel):
+    id: int
+    room_id: int
+    base_price: Decimal
+    created_at: datetime | str | None = None
+
+    class Config:
+        from_attributes = True
+
+class RoomPriceHistoryResponse(BaseModel):
+    season_prices: list[SeasonPriceRead] = []
+    base_prices: list[RoomBasePriceHistoryRead] = []
 
 class RoomBase(BaseModel):
     number: str
@@ -50,6 +69,7 @@ class RoomBase(BaseModel):
     capacity: int
     base_price: Decimal
     description: str | None = None
+    cover_image_url: str | None = None
     is_active: bool = True
 
 class RoomCreate(RoomBase):
@@ -62,8 +82,9 @@ class RoomUpdate(BaseModel):
     capacity: int | None = None
     base_price: Decimal | None = None
     description: str | None = None
+    cover_image_url: str | None = None
     is_active: bool | None = None
-    season_prices: list[SeasonPriceCreate] | None = None
+    season_prices: list[SeasonPriceUpdate] | None = None
     images: list[str] | None = None
 
 class RoomRead(RoomBase):
@@ -83,5 +104,8 @@ class RoomRead(RoomBase):
 
 class RoomSearchResponse(BaseModel):
     room: RoomRead
+    subtotal: Decimal | None = None
+    tax_iva: Decimal | None = None
+    tax_tourism: Decimal | None = None
     total_price: Decimal | None = None
     is_available: bool = True

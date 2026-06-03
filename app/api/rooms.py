@@ -8,10 +8,10 @@ from sqlalchemy import or_, and_
 
 from app.permissions.deps import require_permission
 from app.db.session import get_db
-from app.models.room import Room, SeasonPrice, RoomImage
+from app.models.room import Room, SeasonPrice, RoomImage, RoomBasePriceHistory
+from app.models.room_type import RoomType
 from app.models.reservation import Reservation
-from app.models.reservation import Reservation
-from app.schemas.room import RoomRead, RoomSearchResponse, RoomCreate, RoomUpdate
+from app.schemas.room import RoomRead, RoomSearchResponse, RoomCreate, RoomUpdate, RoomPriceHistoryResponse
 
 from app.services.reservation_service import calculate_price
 from app.services.room_service import create_room as service_create_room, update_room as service_update_room
@@ -37,13 +37,13 @@ def search_rooms(
     ).filter(Room.is_active == True, Room.is_deleted == False, Room.capacity >= guests)
     
     if room_type:
-        q = q.filter(Room.type == room_type)
+        q = q.join(RoomType).filter(RoomType.name == room_type)
         
     rooms = q.all()
 
     # 2. Buscar reservaciones que se crucen con las fechas buscadas
     overlapping_reservations = db.query(Reservation).filter(
-        Reservation.status.in_(["pending", "confirmed"]),
+        Reservation.status.in_(["pending", "verifying", "confirmed"]),
         Reservation.check_in < check_out,
         Reservation.check_out > check_in,
         Reservation.is_deleted == False
@@ -56,11 +56,14 @@ def search_rooms(
         if room.id in occupied_room_ids:
             continue
             
-        total = calculate_price(room, check_in, check_out)
+        price_data = calculate_price(room, check_in, check_out)
         results.append(
             RoomSearchResponse(
                 room=room,
-                total_price=total,
+                subtotal=price_data["subtotal"],
+                tax_iva=price_data["tax_iva"],
+                tax_tourism=price_data["tax_tourism"],
+                total_price=price_data["total"],
                 is_available=True
             )
         )
@@ -74,7 +77,18 @@ def get_public_rooms(db: Session = Depends(get_db)):
         selectinload(Room.images),
         selectinload(Room.season_prices)
     ).filter(Room.is_active == True, Room.is_deleted == False).limit(6).all()
+    
+    for r in rooms:
+        r.season_prices = [sp for sp in r.season_prices if not sp.is_archived]
     return rooms
+
+@router.get("/types", response_model=List[str])
+def get_public_room_types(db: Session = Depends(get_db)):
+    # Obtener nombres de tipos de habitación registrados
+    types = db.query(RoomType.name).filter(
+        RoomType.is_deleted == False
+    ).all()
+    return [t[0] for t in types]
 
 @router.get("/{room_id}", response_model=RoomRead)
 def get_room(room_id: int, db: Session = Depends(get_db)):
@@ -86,7 +100,26 @@ def get_room(room_id: int, db: Session = Depends(get_db)):
     
     if not room:
         raise HTTPException(status_code=404, detail="Habitación no encontrada")
+    
+    # Filtrar activas si es necesario, o la lectura normal ya devuelve ambas.
+    # Preferiblemente RoomRead puede devolver solo activas y esta de abajo todas:
+    room.season_prices = [sp for sp in room.season_prices if not sp.is_archived]
     return room
+
+from app.schemas.room import SeasonPriceRead
+@router.get("/{room_id}/price-history", response_model=RoomPriceHistoryResponse, dependencies=[Depends(require_permission("rooms", "read"))])
+def get_room_price_history(room_id: int, db: Session = Depends(get_db)):
+    room = db.query(Room).filter(Room.id == room_id, Room.is_deleted == False).first()
+    if not room:
+        raise HTTPException(status_code=404, detail="Habitación no encontrada")
+    
+    sp_prices = db.query(SeasonPrice).filter(SeasonPrice.room_id == room_id).order_by(SeasonPrice.created_at.desc(), SeasonPrice.id.desc()).all()
+    bp_history = db.query(RoomBasePriceHistory).filter(RoomBasePriceHistory.room_id == room_id).order_by(RoomBasePriceHistory.created_at.desc(), RoomBasePriceHistory.id.desc()).all()
+    
+    return RoomPriceHistoryResponse(
+        season_prices=sp_prices,
+        base_prices=bp_history
+    )
 
 @router.post("/", response_model=RoomRead, status_code=status.HTTP_201_CREATED, dependencies=[Depends(require_permission("rooms", "create"))])
 def create_room(data: RoomCreate, db: Session = Depends(get_db)):
@@ -129,4 +162,7 @@ def get_all_rooms_admin(db: Session = Depends(get_db)):
         selectinload(Room.images),
         selectinload(Room.season_prices)
     ).filter(Room.is_deleted == False).all()
+    
+    for r in rooms:
+        r.season_prices = [sp for sp in r.season_prices if not sp.is_archived]
     return rooms

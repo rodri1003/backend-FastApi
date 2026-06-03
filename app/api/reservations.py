@@ -1,6 +1,6 @@
 from datetime import date
 from typing import List
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, BackgroundTasks
 from sqlalchemy.orm import Session, selectinload
 from decimal import Decimal
 
@@ -31,7 +31,8 @@ def create_reservation(
         room_id=data.room_id,
         check_in=data.check_in,
         check_out=data.check_out,
-        guests=data.guests
+        guests=data.guests,
+        payment_method=data.payment_method
     )
     return create_admin_reservation(db, admin_data)
 
@@ -41,7 +42,8 @@ def get_my_reservations(
     db: Session = Depends(get_db)
 ):
     return db.query(Reservation).options(
-        selectinload(Reservation.room)
+        selectinload(Reservation.room),
+        selectinload(Reservation.payments)
     ).filter(
         Reservation.user_id == current_user.id, 
         Reservation.is_deleted == False
@@ -54,7 +56,8 @@ def get_reservation(
     db: Session = Depends(get_db)
 ):
     reservation = db.query(Reservation).options(
-        selectinload(Reservation.room)
+        selectinload(Reservation.room),
+        selectinload(Reservation.payments)
     ).filter(Reservation.id == res_id, Reservation.is_deleted == False).first()
     
     if not reservation:
@@ -88,6 +91,7 @@ def update_reservation(
 @router.delete("/{res_id}", status_code=status.HTTP_204_NO_CONTENT)
 def cancel_reservation(
     res_id: int,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: Session = Depends(get_db)
 ):
@@ -99,5 +103,5 @@ def cancel_reservation(
     if reservation.user_id != current_user.id and "admin" not in roles and "manager" not in roles:
         raise HTTPException(status_code=403, detail="No autorizado")
 
-    service_cancel_reservation(db, reservation)
+    service_cancel_reservation(db, reservation, background_tasks)
     return

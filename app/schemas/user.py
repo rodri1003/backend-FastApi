@@ -33,6 +33,15 @@ class UserProfileBase(BaseModel):
     department: str | None = Field(default=None, max_length=100)
     municipality: str | None = Field(default=None, max_length=100)
     address_complement: str | None = Field(default=None, max_length=255)
+    
+    person_type: str | None = Field(default=None, max_length=20)
+    document_type: str | None = Field(default=None, max_length=50)
+    document_number: str | None = Field(default=None, max_length=50)
+    nrc: str | None = Field(default=None, max_length=50)
+    nit: str | None = Field(default=None, max_length=20)
+    business_name: str | None = Field(default=None, max_length=200)
+    economic_activity: str | None = Field(default=None, max_length=255)
+    taxpayer_type: str | None = Field(default=None, max_length=50)
 
 
 class UserProfileUpdate(BaseModel):
@@ -45,6 +54,14 @@ class UserProfileUpdate(BaseModel):
     department: str | None = Field(default=None, max_length=100)
     municipality: str | None = Field(default=None, max_length=100)
     address_complement: str | None = Field(default=None, max_length=255)
+    person_type: str | None = Field(default=None, max_length=20)
+    document_type: str | None = Field(default=None, max_length=50)
+    document_number: str | None = Field(default=None, max_length=50)
+    nrc: str | None = Field(default=None, max_length=50)
+    nit: str | None = Field(default=None, max_length=20)
+    business_name: str | None = Field(default=None, max_length=200)
+    economic_activity: str | None = Field(default=None, max_length=255)
+    taxpayer_type: str | None = Field(default=None, max_length=50)
 
     @field_validator("phone")
     @classmethod
@@ -115,13 +132,15 @@ class UserCreate(UserBase, UserProfileBase):
 
 class UserCreateAdmin(UserBase, UserProfileBase):
     """Para crear usuarios desde el admin (obligatorio asignar rol)."""
-    password: str = Field(..., min_length=10, max_length=128)
+    password: str | None = Field(default=None, min_length=10, max_length=128)
     role_id: int = Field(..., gt=0)
 
     @field_validator("password")
     @classmethod
-    def password_complexity(cls, v: str) -> str:
-        # Reutilizar lógica o copiar; Pydantic permite heredar pero aquí lo copio para claridad o uso un helper
+    def password_complexity(cls, v: str | None) -> str | None:
+        if v is None:
+            return v
+        # Reutilizar lógica o copiar
         if not re.search(r"[A-Z]", v):
             raise ValueError("La contraseña debe tener al menos una letra mayúscula")
         if not re.search(r"[a-z]", v):
@@ -164,6 +183,14 @@ class UserUpdateAdmin(BaseModel):
     department: str | None = Field(default=None, max_length=100)
     municipality: str | None = Field(default=None, max_length=100)
     address_complement: str | None = Field(default=None, max_length=255)
+    person_type: str | None = Field(default=None, max_length=20)
+    document_type: str | None = Field(default=None, max_length=50)
+    document_number: str | None = Field(default=None, max_length=50)
+    nrc: str | None = Field(default=None, max_length=50)
+    nit: str | None = Field(default=None, max_length=20)
+    business_name: str | None = Field(default=None, max_length=200)
+    economic_activity: str | None = Field(default=None, max_length=255)
+    taxpayer_type: str | None = Field(default=None, max_length=50)
     
     @field_validator("phone")
     @classmethod

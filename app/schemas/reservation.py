@@ -17,6 +17,7 @@ class ReservationBase(BaseModel):
     check_in: date
     check_out: date
     guests: int
+    payment_method: str | None = None
 
 class ReservationCreate(ReservationBase):
     pass
@@ -25,6 +26,7 @@ class ReservationUpdate(BaseModel):
     check_in: date | None = None
     check_out: date | None = None
     guests: int | None = None
+    payment_method: str | None = None
 
 class AdminReservationCreate(ReservationBase):
     user_id: int
@@ -36,6 +38,7 @@ class AdminReservationUpdate(BaseModel):
     check_out: date | None = None
     guests: int | None = None
     status: str | None = None
+    payment_method: str | None = None
 
 class ResPaymentRead(BaseModel):
     id: int
@@ -43,6 +46,7 @@ class ResPaymentRead(BaseModel):
     method: str
     status: str
     receipt_type: str | None
+    receipt_data: dict | None = None
     created_at: datetime
     
     model_config = ConfigDict(from_attributes=True)
@@ -57,8 +61,14 @@ class ReservationRead(BaseModel):
     check_in: date
     check_out: date
     guests: int
+    
+    subtotal: Decimal | None = None
+    tax_iva: Decimal | None = None
+    tax_tourism: Decimal | None = None
     total_cost: Decimal
+    
     status: str
+    payment_method: str | None = None
     created_at: datetime
     updated_at: datetime
     
