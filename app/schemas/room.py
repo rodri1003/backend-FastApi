@@ -1,6 +1,7 @@
 from datetime import date, datetime
 from decimal import Decimal
 from pydantic import BaseModel, Field
+from app.schemas.amenity import AmenityRead
 
 class RoomTypeBase(BaseModel):
     name: str
@@ -15,16 +16,12 @@ class RoomTypeRead(RoomTypeBase):
     class Config:
         from_attributes = True
 
-class RoomAmenityRead(BaseModel):
-    id: int
-    name: str
-
-    class Config:
-        from_attributes = True
+RoomAmenityRead = AmenityRead
 
 class RoomImageRead(BaseModel):
     id: int
     url: str
+    sort_order: int = 0
 
     class Config:
         from_attributes = True
@@ -75,6 +72,7 @@ class RoomBase(BaseModel):
 class RoomCreate(RoomBase):
     season_prices: list[SeasonPriceCreate] = []
     images: list[str] = []
+    amenities: list[int] = []  # IDs from amenity catalog
 
 class RoomUpdate(BaseModel):
     number: str | None = None
@@ -86,6 +84,7 @@ class RoomUpdate(BaseModel):
     is_active: bool | None = None
     season_prices: list[SeasonPriceUpdate] | None = None
     images: list[str] | None = None
+    amenities: list[int] | None = None  # IDs from amenity catalog
 
 class RoomRead(RoomBase):
     id: int
