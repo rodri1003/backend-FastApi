@@ -1,0 +1,49 @@
+services:
+  db:
+    image: mcr.microsoft.com/mssql/server:2022-latest
+    container_name: afe-sqlserver
+    restart: always
+    environment:
+      - ACCEPT_EULA=Y
+      - MSSQL_SA_PASSWORD=SomeSecurePassword123!
+    ports:
+      - "1433:1433"
+    volumes:
+      - sql_data:/var/opt/mssql
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: afe-backend
+    restart: always
+    env_file:
+      - .env
+    environment:
+      - DB_SERVER=db
+      - DB_NAME=ProyectoAFE_RBAC
+      - DB_TRUSTED_CONNECTION=no
+      - DB_USER=sa
+      - DB_PASSWORD=SomeSecurePassword123!
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./db_seed:/app/db_seed
+    depends_on:
+      - db
+
+  frontend:
+    build:
+      context: ../proyecto-frontend
+      dockerfile: Dockerfile
+    container_name: afe-frontend
+    restart: always
+    env_file:
+      - ../proyecto-frontend/.env
+    ports:
+      - "5173:5173"
+    depends_on:
+      - backend
+
+volumes:
+  sql_data:
