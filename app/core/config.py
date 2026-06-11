@@ -12,6 +12,8 @@ class Settings:
     DB_SERVER: str = os.getenv("DB_SERVER", r"localhost\SQLEXPRESS")
     DB_NAME: str = os.getenv("DB_NAME", "master")
     DB_TRUSTED_CONNECTION: str = os.getenv("DB_TRUSTED_CONNECTION", "yes")
+    DB_USER: str = os.getenv("DB_USER", "")
+    DB_PASSWORD: str = os.getenv("DB_PASSWORD", "")
 
     JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "change-me-immediately")
     JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
