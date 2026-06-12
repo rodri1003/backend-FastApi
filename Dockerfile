@@ -20,6 +20,7 @@ RUN apt-get update && ACCEPT_EULA=Y apt-get install -y --no-install-recommends \
 
 # Set working directory
 WORKDIR /app
+ENV PYTHONPATH=/app
 
 # Copy requirements and install python packages
 COPY requirements.txt .
