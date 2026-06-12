@@ -204,7 +204,6 @@ def get_dashboard_stats(db: Session = Depends(get_db)):
     # 6. Market Mix (Revenue by Room Type) - Compute both Gross and Net room revenue allocations!
     from decimal import Decimal
     from app.services.system_settings_service import get_tax_iva, get_tax_tourism
-    from sqlalchemy.orm import selectinload
     iva_rate = Decimal(str(get_tax_iva(db)))
     tourism_rate = Decimal(str(get_tax_tourism(db)))
     room_tax_factor = Decimal("1.0") + iva_rate + tourism_rate
