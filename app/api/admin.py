@@ -27,9 +27,9 @@ from app.models.reservation import Reservation
 from app.models.payment import Payment
 from app.models.room_type import RoomType
 from sqlalchemy import func, cast, Date, text
-from app.schemas.user import UserRead, UserCreateAdmin, UserUpdateAdmin, RoleRead, RoleCreate, RoleUpdate
-from app.schemas.reservation import ReservationRead, AdminReservationCreate, AdminReservationUpdate
-from app.schemas.payment import PaymentCreate, PaymentRead
+from app.schemas.user import UserRead, UserCreateAdmin, UserUpdateAdmin, RoleRead, RoleCreate, RoleUpdate, UserSummary
+from app.schemas.reservation import ReservationRead, AdminReservationCreate, AdminReservationUpdate, ReservationListItem, ReservationSummary
+from app.schemas.payment import PaymentCreate, PaymentRead, PaymentListItem, PaginatedPayments
 from app.schemas.admin import PolicyRead, PolicyCreate, AuditLogRead
 from app.schemas.room import RoomTypeRead, RoomTypeCreate
 from typing import Optional
@@ -148,7 +148,10 @@ def get_dashboard_stats(db: Session = Depends(get_db)):
     revenue_map = {str(row.day): float(row.total) for row in chart_data_raw}
     
     # Forecast (Next 7 days based on pending/confirmed reservations)
-    reservations_next_7 = db.query(Reservation).filter(
+    reservations_next_7 = db.query(Reservation).options(
+        selectinload(Reservation.payments),
+        selectinload(Reservation.incidental_charges)
+    ).filter(
         Reservation.status.in_(["pending", "confirmed"]),
         Reservation.check_in >= today,
         Reservation.check_in <= next_week,
@@ -169,10 +172,7 @@ def get_dashboard_stats(db: Session = Depends(get_db)):
         from app.services.reservation_service import calculate_grand_total
         grand_total = calculate_grand_total(res, db)
         
-        raw_paid = db.query(func.sum(Payment.amount)).filter(
-            Payment.reservation_id == res.id,
-            Payment.status == "completed"
-        ).scalar() or 0.0
+        raw_paid = sum(p.amount for p in res.payments if p.status == "completed")
         
         pending = max(Decimal("0.0"), grand_total - Decimal(str(raw_paid)))
         forecast_cash_map[day_str] += float(pending)
@@ -302,14 +302,20 @@ def get_dashboard_stats(db: Session = Depends(get_db)):
         "market_mix": mix_data
     }
 
-@router.get("/reservations", response_model=list[ReservationRead], dependencies=[Depends(require_permission("reservations", "read"))])
+@router.get("/reservations", response_model=list[ReservationListItem], dependencies=[Depends(require_permission("reservations", "read"))])
 def list_all_reservations(
     db: Session = Depends(get_db),
     room_id: int | None = Query(default=None),
-    limit: int = Query(default=100, ge=1, le=500),
+    limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ):
-    query = db.query(Reservation).options(selectinload(Reservation.room)).filter(Reservation.is_deleted == False)
+    query = db.query(Reservation).options(
+        selectinload(Reservation.room),
+        selectinload(Reservation.user).selectinload(User.profile),
+        selectinload(Reservation.payments),
+        selectinload(Reservation.extras),
+        selectinload(Reservation.incidental_charges)
+    ).filter(Reservation.is_deleted == False)
     
     if room_id:
         query = query.filter(Reservation.room_id == room_id)
@@ -317,6 +323,28 @@ def list_all_reservations(
     reservations = (
         query.order_by(Reservation.created_at.desc())
         .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    return reservations
+
+@router.get("/recent-reservations", response_model=list[ReservationSummary], dependencies=[Depends(require_permission("reservations", "read"))])
+def get_recent_reservations(
+    db: Session = Depends(get_db),
+    limit: int = Query(default=6, ge=1, le=50),
+):
+    """
+    Endpoint ultra-liviano para obtener las reservaciones más recientes en el Dashboard,
+    evitando cargar relaciones costosas.
+    """
+    reservations = (
+        db.query(Reservation)
+        .options(
+            selectinload(Reservation.user).selectinload(User.profile),
+            selectinload(Reservation.room)
+        )
+        .filter(Reservation.is_deleted == False)
+        .order_by(Reservation.created_at.desc())
         .limit(limit)
         .all()
     )
@@ -694,19 +722,22 @@ async def create_wompi_link_admin(
     url = await generate_wompi_payment_link(reservation.unique_id, float(balance), redirect_url)
     return {"url": url}
 
-@router.get("/payments", response_model=list[PaymentRead], dependencies=[Depends(require_permission("payments", "read"))])
+@router.get("/payments", response_model=PaginatedPayments, dependencies=[Depends(require_permission("payments", "read"))])
 def list_all_payments(
     db: Session = Depends(get_db),
     start_date: datetime | None = Query(default=None),
     end_date: datetime | None = Query(default=None),
     method: str | None = Query(default=None),
     status: str | None = Query(default=None),
-    limit: int = Query(default=100, ge=1, le=500),
+    limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ):
     query = db.query(Payment).options(
-        selectinload(Payment.reservation).selectinload(Reservation.user),
-        selectinload(Payment.reservation).selectinload(Reservation.room)
+        selectinload(Payment.reservation).options(
+            selectinload(Reservation.user).selectinload(User.profile),
+            selectinload(Reservation.room),
+            selectinload(Reservation.incidental_charges)
+        )
     )
     
     if start_date:
@@ -718,8 +749,14 @@ def list_all_payments(
     if status:
         query = query.filter(Payment.status == status)
         
+    total = query.count()
     payments = query.order_by(Payment.created_at.desc()).offset(offset).limit(limit).all()
-    return payments
+    return {
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+        "items": payments
+    }
 
 @router.get("/payments/{payment_id}", response_model=PaymentRead, dependencies=[Depends(require_permission("payments", "read"))])
 def get_payment_detail_admin(
@@ -1181,7 +1218,7 @@ async def upload_admin_image(
 @router.get("/users", response_model=list[UserRead], dependencies=[Depends(require_permission("users", "read"))])
 def list_users(
     db: Session = Depends(get_db),
-    limit: int = Query(default=100, ge=1, le=500),
+    limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ):
     users = (
@@ -1300,7 +1337,7 @@ def deactivate_user(
 @router.get("/clients", response_model=list[UserRead], dependencies=[Depends(require_permission("customers", "read"))])
 def list_clients(
     db: Session = Depends(get_db),
-    limit: int = Query(default=100, ge=1, le=500),
+    limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
 ):
     # Filtrar solo usuarios con el rol "cliente"
