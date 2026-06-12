@@ -51,10 +51,11 @@ except Exception as e:
     print(f"[SSL Patch Warning] Failed to patch urllib3: {e}")
 
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+import traceback
 
 from app.api.users import router as users_router
 from app.api.auth import router as auth_router
@@ -73,9 +74,18 @@ app = FastAPI()
 
 cors_origins_raw = os.getenv(
     "CORS_ORIGINS",
-    "http://localhost:5173,http://127.0.0.1:5173"
+    "http://localhost:5173,http://127.0.0.1:5173,https://proyecto-frontend-three.vercel.app"
 )
-cors_origins = [origin.strip() for origin in cors_origins_raw.split(",") if origin.strip()]
+# Normalizar orígenes eliminando espacios y barras diagonales finales para evitar desajustes en CORS
+cors_origins = []
+for origin in cors_origins_raw.split(","):
+    origin = origin.strip()
+    if origin:
+        if origin.endswith("/"):
+            origin = origin[:-1]
+        cors_origins.append(origin)
+
+print(f"[CORS] Orígenes permitidos configurados: {cors_origins}")
 
 app.add_middleware(
     CORSMiddleware,
@@ -86,7 +96,7 @@ app.add_middleware(
 )
 
 @app.exception_handler(RequestValidationError)
-async def validation_exception_handler(request, exc: RequestValidationError):
+async def validation_exception_handler(request: Request, exc: RequestValidationError):
     errors = []
     for error in exc.errors():
         loc = error.get("loc", [])
@@ -115,6 +125,15 @@ async def validation_exception_handler(request, exc: RequestValidationError):
     return JSONResponse(
         status_code=422,
         content={"detail": errors[0] if errors else "Error de validación"},
+    )
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request: Request, exc: Exception):
+    print(f"[Error No Controlado] {type(exc).__name__}: {str(exc)}")
+    traceback.print_exc()
+    return JSONResponse(
+        status_code=500,
+        content={"detail": f"Error interno del servidor: {str(exc)}"},
     )
 
 from app.services.reservation_service import auto_cancel_expired_reservations, auto_send_checkin_reminders
