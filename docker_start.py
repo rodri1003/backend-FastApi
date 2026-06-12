@@ -196,25 +196,27 @@ def import_sql_seeds():
                     table, cols, vals = parsed
                     
                     try:
-                        # Check if row already exists
-                        if row_exists(connection, table, cols, vals):
-                            existing_count += 1
-                            continue
-                            
-                        # If not, insert it
-                        use_identity = False
-                        if "id" in cols and table not in ("alembic_version", "room_amenities", "user_roles"):
-                            use_identity = True
-                            
+                        # Envolver todo el bloque de verificación e inserción en una única transacción
+                        # para evitar el autobegin implícito de SQLAlchemy 2.0 y conflictos de transacción
                         with connection.begin():
+                            # Comprobar si el registro ya existe
+                            if row_exists(connection, table, cols, vals):
+                                existing_count += 1
+                                continue
+                                
+                            # Si no existe, insertar
+                            use_identity = False
+                            if "id" in cols and table not in ("alembic_version", "room_amenities", "user_roles"):
+                                use_identity = True
+                                
                             if use_identity:
                                 connection.execute(text(f"SET IDENTITY_INSERT [dbo].[{table}] ON"))
                             connection.execute(text(stmt))
                             if use_identity:
                                 connection.execute(text(f"SET IDENTITY_INSERT [dbo].[{table}] OFF"))
                                 
-                        success_count += 1
-                        
+                            success_count += 1
+                            
                     except Exception as stmt_err:
                         failed_count += 1
                         print(f"[Warning] Statement {idx+1} failed: {stmt[:120]}")
