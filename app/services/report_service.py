@@ -140,8 +140,14 @@ class ReportService:
         total_rooms = db.query(Room).filter(Room.is_active == True, Room.is_deleted == False).count()
         if total_rooms <= 0: total_rooms = 1
 
+        from sqlalchemy.orm import selectinload
+
         # Query all completed payments in the period
-        completed_payments = db.query(Payment).filter(
+        completed_payments = db.query(Payment).options(
+            selectinload(Payment.reservation).options(
+                selectinload(Reservation.incidental_charges)
+            )
+        ).filter(
             Payment.status == "completed",
             cast(func.dateadd(text('hour'), -6, Payment.created_at), Date) >= start_date,
             cast(func.dateadd(text('hour'), -6, Payment.created_at), Date) <= end_date
@@ -162,8 +168,8 @@ class ReportService:
         total_revenue_decimal = Decimal("0.0")
 
         for pay in completed_payments:
-            pay_date = db.query(cast(func.dateadd(text('hour'), -6, Payment.created_at), Date)).filter(Payment.id == pay.id).scalar()
-            d_str = str(pay_date)
+            local_dt = pay.created_at - timedelta(hours=6)
+            d_str = str(local_dt.date())
             
             amount = Decimal(str(pay.amount))
             res = pay.reservation

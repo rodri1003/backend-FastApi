@@ -108,3 +108,13 @@ class RoomSearchResponse(BaseModel):
     tax_tourism: Decimal | None = None
     total_price: Decimal | None = None
     is_available: bool = True
+
+
+class RoomSummary(BaseModel):
+    """Habitación mínima para listados — sin amenities/images/season_prices."""
+    id: int
+    number: str
+    type: str | None = None
+
+    class Config:
+        from_attributes = True

@@ -235,3 +235,25 @@ class LoginRequest(BaseModel):
 class Token(BaseModel):
     access_token: str
     token_type: str = "bearer"
+
+
+class UserProfileSummary(BaseModel):
+    """Perfil mínimo para listados — evita lazy-load de campos no necesarios."""
+    first_name: str | None = None
+    last_name: str | None = None
+    phone: str | None = None
+    person_type: str | None = None
+    business_name: str | None = None
+
+    class Config:
+        from_attributes = True
+
+
+class UserSummary(BaseModel):
+    """Usuario mínimo para embeber en listados de reservaciones y pagos."""
+    id: int
+    email: str
+    profile: UserProfileSummary | None = None
+
+    class Config:
+        from_attributes = True

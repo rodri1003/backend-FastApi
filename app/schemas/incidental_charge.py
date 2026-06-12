@@ -87,3 +87,11 @@ class IncidentalChargeRead(BaseModel):
     updated_at: datetime
 
     model_config = ConfigDict(from_attributes=True)
+
+
+class IncidentalChargeSummary(BaseModel):
+    payment_status: str
+    apply_tax: bool
+    total_amount: Decimal
+
+    model_config = ConfigDict(from_attributes=True)
