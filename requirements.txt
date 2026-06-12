@@ -31,3 +31,4 @@ Pillow==11.2.1
 python-multipart==0.0.20
 qrcode==8.0
 fpdf2==2.8.3
+cloudinary==1.41.0
