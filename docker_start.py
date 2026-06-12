@@ -55,18 +55,41 @@ def import_sql_seeds():
                     print(f"Could not read file {sql_file} with supported encodings. Skipping.")
                     continue
                 
-                # Split only on lines that are exactly GO (case-insensitive, ignoring spacing)
-                blocks = re.split(r'(?mi)^\s*go\s*$', content)
-                for index, block in enumerate(blocks):
-                    block = block.strip()
-                    if block:
-                        try:
-                            connection.execute(text(block))
-                        except Exception as block_err:
-                            print(f"[Warning] Error executing block {index+1} in {sql_file}: {block_err}")
+                # Split content into individual lines
+                lines = content.splitlines()
+                statements = []
+                for line in lines:
+                    line_str = line.strip()
+                    if not line_str:
+                        continue
+                    if line_str.upper() == "GO":
+                        continue
+                    if line_str.startswith("--"):
+                        continue
+                    statements.append(line_str)
                 
-                connection.commit()
-                print(f"Successfully executed {sql_file}.")
+                print(f"Executing {len(statements)} statements from {sql_file} line-by-line...")
+                
+                success_count = 0
+                ignored_pk_count = 0
+                failed_count = 0
+                
+                for idx, stmt in enumerate(statements):
+                    try:
+                        with connection.begin():
+                            connection.execute(text(stmt))
+                        success_count += 1
+                    except Exception as stmt_err:
+                        err_msg = str(stmt_err)
+                        # Check for primary key / duplicate key violations (error code 2627 or similar)
+                        if "2627" in err_msg or "23000" in err_msg or "Cannot insert duplicate key" in err_msg:
+                            ignored_pk_count += 1
+                        else:
+                            failed_count += 1
+                            print(f"[Warning] Statement {idx+1} failed: {stmt[:120]}")
+                            print(f"  Error: {err_msg[:200]}")
+                
+                print(f"Finished executing {sql_file}. Stats: Success: {success_count}, Ignored Duplicates: {ignored_pk_count}, Failures: {failed_count}")
                 
                 # Rename the file to .sql.imported so it doesn't run again on next boot
                 imported_path = file_path + ".imported"
