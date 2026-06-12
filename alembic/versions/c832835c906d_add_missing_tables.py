@@ -143,7 +143,7 @@ def upgrade() -> None:
     sa.Column('payment_status', sa.String(length=20), nullable=False),
     sa.Column('notes', sa.String(length=500), nullable=True),
     sa.Column('created_at', sa.DateTime(timezone=True), server_default=sa.text('GETUTCDATE()'), nullable=False),
-    sa.ForeignKeyConstraint(['extra_amenity_id'], ['extra_amenities.id'], ondelete='RESTRICT'),
+    sa.ForeignKeyConstraint(['extra_amenity_id'], ['extra_amenities.id'], ondelete='NO ACTION'),
     sa.ForeignKeyConstraint(['reservation_id'], ['reservations.id'], ondelete='CASCADE'),
     sa.PrimaryKeyConstraint('id')
     )

@@ -69,7 +69,7 @@ class ReservationExtraAmenity(Base):
         nullable=False, index=True
     )
     extra_amenity_id = Column(
-        Integer, ForeignKey("extra_amenities.id", ondelete="RESTRICT"),
+        Integer, ForeignKey("extra_amenities.id", ondelete="NO ACTION"),
         nullable=False
     )
     quantity = Column(Integer, nullable=False, default=1)
