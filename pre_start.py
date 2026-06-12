@@ -11,7 +11,33 @@ def main():
     
     driver = "ODBC Driver 17 for SQL Server"
     
-    # Connect to 'master' database first to check/create the target DB
+    # 1. Try to connect directly to the target database first
+    # (Useful for production/shared hosting where we don't have access to 'master')
+    target_odbc_str = (
+        f"DRIVER={{{driver}}};"
+        f"SERVER={settings.DB_SERVER};"
+        f"DATABASE={settings.DB_NAME};"
+        f"TrustServerCertificate=yes;"
+    )
+    if settings.DB_TRUSTED_CONNECTION.lower() == "yes":
+        target_odbc_str += "Trusted_Connection=yes;"
+    else:
+        target_odbc_str += f"UID={settings.DB_USER};PWD={settings.DB_PASSWORD};"
+        
+    target_db_url = "mssql+pyodbc:///?odbc_connect=" + quote_plus(target_odbc_str)
+    
+    try:
+        print(f"Attempting direct connection to target database '{settings.DB_NAME}'...")
+        engine = create_engine(target_db_url)
+        with engine.connect() as conn:
+            conn.execute(text("SELECT 1"))
+        print(f"Connected successfully to database '{settings.DB_NAME}'. Skipping creation check.")
+        return
+    except Exception as direct_err:
+        print(f"Direct connection to '{settings.DB_NAME}' failed (expected if DB does not exist locally yet): {direct_err}")
+        print("Falling back to master connection to check/create database...")
+        
+    # 2. Connect to 'master' database first to check/create the target DB (Local Docker)
     odbc_str = (
         f"DRIVER={{{driver}}};"
         f"SERVER={settings.DB_SERVER};"
