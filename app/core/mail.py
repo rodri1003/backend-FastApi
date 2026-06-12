@@ -146,6 +146,22 @@ async def send_reservation_confirmed_email(
     checkin_t_formatted = _format_time_12h(schedule["checkin_time"])
     checkout_t_formatted = _format_time_12h(schedule["checkout_time"])
     
+    dte_block_confirm = ""
+    if has_attachments:
+        dte_block_confirm = (
+            '<div style="background-color: #fffbeb; border: 1px solid #fde68a; '
+            'border-radius: 16px; padding: 20px; margin: 20px 0;">'
+            '<h3 style="color: #92400e; font-size: 13px; margin-top: 0; '
+            'text-transform: uppercase; letter-spacing: 0.1em;">'
+            '📎 Documentos Tributarios Adjuntos</h3>'
+            '<p style="margin: 6px 0; color: #78350f; font-size: 14px;">'
+            'Adjunto a este correo encontrarás tu comprobante fiscal:</p>'
+            '<ul style="color: #78350f; font-size: 13px; padding-left: 20px;">'
+            '<li><strong>DTE.pdf</strong> — Representación gráfica del DTE</li>'
+            '<li><strong>DTE.json</strong> — Documento tributario electrónico '
+            '(formato estándar MH)</li></ul></div>'
+        )
+
     html = f"""
     <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: auto; padding: 40px; border: 1px solid #e2e8f0; border-radius: 24px; background-color: #ffffff;">
         <div style="text-align: center; margin-bottom: 40px;">
@@ -162,7 +178,7 @@ async def send_reservation_confirmed_email(
             <p style="margin: 8px 0; color: #475569;"><strong>Check-out:</strong> {check_out} (hasta las {checkout_t_formatted})</p>
         </div>
 
-        {"<div style='background-color: #fffbeb; border: 1px solid #fde68a; border-radius: 16px; padding: 20px; margin: 20px 0;'><h3 style='color: #92400e; font-size: 13px; margin-top: 0; text-transform: uppercase; letter-spacing: 0.1em;'>📎 Documentos Tributarios Adjuntos</h3><p style=\"margin: 6px 0; color: #78350f; font-size: 14px;\">Adjunto a este correo encontrarás tu comprobante fiscal:</p><ul style=\"color: #78350f; font-size: 13px; padding-left: 20px;\"><li><strong>DTE.pdf</strong> — Representación gráfica del DTE</li><li><strong>DTE.json</strong> — Documento tributario electrónico (formato estándar MH)</li></ul></div>" if has_attachments else ""}
+        {dte_block_confirm}
         
         <p style="color: #334155; font-size: 14px; line-height: 1.6; font-style: italic;">Te recomendamos revisar las políticas del hotel antes de tu llegada. ¡Buen viaje!</p>
         
@@ -247,6 +263,22 @@ async def send_payment_receipt_email(
     }
     method_display = method_labels.get(payment_method.lower(), payment_method.capitalize())
 
+    dte_block_receipt = ""
+    if has_attachments:
+        dte_block_receipt = (
+            '<div style="background-color: #fffbeb; border: 1px solid #fde68a; '
+            'border-radius: 16px; padding: 20px; margin: 20px 0;">'
+            '<h3 style="color: #92400e; font-size: 13px; margin: 0 0 8px 0; '
+            'text-transform: uppercase; letter-spacing: 0.1em;">'
+            '📎 Documento Tributario Electrónico (DTE)</h3>'
+            '<p style="margin: 6px 0; color: #78350f; font-size: 14px;">'
+            'Adjunto a este correo encontrarás tu comprobante fiscal:</p>'
+            '<ul style="color: #78350f; font-size: 13px; padding-left: 20px; margin: 4px 0;">'
+            '<li><strong>DTE.pdf</strong> — Representación gráfica del DTE</li>'
+            '<li><strong>DTE.json</strong> — Documento tributario electrónico '
+            '(formato estándar MH)</li></ul></div>'
+        )
+
     html = f"""
     <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; max-width: 600px; margin: auto; padding: 40px; border: 1px solid #dcfce7; border-radius: 24px; background-color: #ffffff;">
         <div style="text-align: center; margin-bottom: 40px;">
@@ -281,14 +313,7 @@ async def send_payment_receipt_email(
             </div>
         </div>
 
-        {'''<div style="background-color: #fffbeb; border: 1px solid #fde68a; border-radius: 16px; padding: 20px; margin: 20px 0;">
-            <h3 style="color: #92400e; font-size: 13px; margin: 0 0 8px 0; text-transform: uppercase; letter-spacing: 0.1em;">📎 Documento Tributario Electrónico (DTE)</h3>
-            <p style="margin: 6px 0; color: #78350f; font-size: 14px;">Adjunto a este correo encontrarás tu comprobante fiscal:</p>
-            <ul style="color: #78350f; font-size: 13px; padding-left: 20px; margin: 4px 0;">
-                <li><strong>DTE.pdf</strong> — Representación gráfica del DTE</li>
-                <li><strong>DTE.json</strong> — Documento tributario electrónico (formato estándar MH)</li>
-            </ul>
-        </div>''' if has_attachments else ""}
+        {dte_block_receipt}
 
         <p style="color: #64748b; font-size: 13px; line-height: 1.6; font-style: italic;">Conserva este correo como respaldo de tu pago. Si tienes alguna consulta, no dudes en contactarnos.</p>
 
