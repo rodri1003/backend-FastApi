@@ -128,7 +128,7 @@ def row_exists(connection, table, cols, vals):
     return False
 
 def import_sql_seeds():
-    seed_dir = "/app/db_seed"
+    seed_dir = "/app/db_seed" if os.path.exists("/app/db_seed") else "./db_seed"
     if not os.path.exists(seed_dir):
         print(f"Directory {seed_dir} does not exist. Skipping SQL seed import.")
         return
@@ -156,51 +156,50 @@ def import_sql_seeds():
     
     try:
         engine = create_engine(db_url)
-        with engine.connect() as connection:
-            for sql_file in sorted(sql_files):
-                file_path = os.path.join(seed_dir, sql_file)
-                print(f"Analyzing and synchronizing seed file: {sql_file}...")
-                
-                content = ""
-                for encoding in ["utf-8", "utf-16", "latin-1"]:
-                    try:
-                        with open(file_path, "r", encoding=encoding) as f:
-                            content = f.read()
-                        break
-                    except UnicodeDecodeError:
-                        continue
-                
-                if not content:
-                    print(f"Could not read file {sql_file}. Skipping.")
+        for sql_file in sorted(sql_files):
+            file_path = os.path.join(seed_dir, sql_file)
+            print(f"Analyzing and synchronizing seed file: {sql_file}...")
+            
+            content = ""
+            for encoding in ["utf-8", "utf-16", "latin-1"]:
+                try:
+                    with open(file_path, "r", encoding=encoding) as f:
+                        content = f.read()
+                    break
+                except UnicodeDecodeError:
                     continue
+            
+            if not content:
+                print(f"Could not read file {sql_file}. Skipping.")
+                continue
+            
+            lines = content.splitlines()
+            statements = []
+            for line in lines:
+                line_str = line.strip()
+                if not line_str or line_str.upper() == "GO" or line_str.startswith("--"):
+                    continue
+                if line_str.upper().startswith("INSERT"):
+                    statements.append(line_str)
+            
+            print(f"Parsed {len(statements)} INSERT statements from {sql_file}.")
+            
+            success_count = 0
+            existing_count = 0
+            failed_count = 0
+            
+            for idx, stmt in enumerate(statements):
+                parsed = parse_insert(stmt)
+                if not parsed:
+                    continue
+                table, cols, vals = parsed
                 
-                lines = content.splitlines()
-                statements = []
-                for line in lines:
-                    line_str = line.strip()
-                    if not line_str or line_str.upper() == "GO" or line_str.startswith("--"):
-                        continue
-                    if line_str.upper().startswith("INSERT"):
-                        statements.append(line_str)
-                
-                print(f"Parsed {len(statements)} INSERT statements from {sql_file}.")
-                
-                success_count = 0
-                existing_count = 0
-                failed_count = 0
-                
-                for idx, stmt in enumerate(statements):
-                    parsed = parse_insert(stmt)
-                    if not parsed:
-                        continue
-                    table, cols, vals = parsed
-                    
-                    try:
-                        # Envolver todo el bloque de verificación e inserción en una única transacción
-                        # para evitar el autobegin implícito de SQLAlchemy 2.0 y conflictos de transacción
-                        with connection.begin():
+                try:
+                    # Usar una conexion fresca por cada statement para evitar conflictos y corrupcion de transacciones
+                    with engine.connect() as conn:
+                        with conn.begin():
                             # Comprobar si el registro ya existe
-                            if row_exists(connection, table, cols, vals):
+                            if row_exists(conn, table, cols, vals):
                                 existing_count += 1
                                 continue
                                 
@@ -210,27 +209,27 @@ def import_sql_seeds():
                                 use_identity = True
                                 
                             if use_identity:
-                                connection.execute(text(f"SET IDENTITY_INSERT [dbo].[{table}] ON"))
-                            connection.execute(text(stmt))
+                                conn.execute(text(f"SET IDENTITY_INSERT [dbo].[{table}] ON"))
+                            conn.execute(text(stmt))
                             if use_identity:
-                                connection.execute(text(f"SET IDENTITY_INSERT [dbo].[{table}] OFF"))
+                                conn.execute(text(f"SET IDENTITY_INSERT [dbo].[{table}] OFF"))
                                 
                             success_count += 1
                             
-                    except Exception as stmt_err:
-                        failed_count += 1
-                        print(f"[Warning] Statement {idx+1} failed: {stmt[:120]}")
-                        print(f"  Error: {str(stmt_err)[:200]}")
-                
-                print(f"Finished sync for {sql_file}. Stats: Inserted: {success_count}, Already Exists: {existing_count}, Failures: {failed_count}")
-                
-                # Rename the file to .sql.imported so it doesn't run again on next boot
-                imported_path = file_path + ".imported"
-                try:
-                    os.rename(file_path, imported_path)
-                    print(f"Renamed {sql_file} to {sql_file}.imported")
-                except Exception as rename_err:
-                    print(f"Could not rename {sql_file}: {rename_err}")
+                except Exception as stmt_err:
+                    failed_count += 1
+                    print(f"[Warning] Statement {idx+1} failed: {stmt[:120]}")
+                    print(f"  Error: {str(stmt_err)[:200]}")
+            
+            print(f"Finished sync for {sql_file}. Stats: Inserted: {success_count}, Already Exists: {existing_count}, Failures: {failed_count}")
+            
+            # Rename the file to .sql.imported so it doesn't run again on next boot
+            imported_path = file_path + ".imported"
+            try:
+                os.rename(file_path, imported_path)
+                print(f"Renamed {sql_file} to {sql_file}.imported")
+            except Exception as rename_err:
+                print(f"Could not rename {sql_file}: {rename_err}")
                     
     except Exception as e:
         print(f"Error importing SQL seeds: {e}")
