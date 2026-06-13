@@ -64,7 +64,7 @@ class IncidentalCharge(Base):
     apply_tax = Column(Boolean, default=True, nullable=False)  # Si aplica IVA
 
     # Estados: 'pending' | 'paid' | 'waived'
-    payment_status = Column(String(20), nullable=False, default="pending")
+    payment_status = Column(String(20), nullable=False, default="pending", index=True)
     waived_reason = Column(String(500), nullable=True)         # Motivo si fue condonado
 
     evidence_url = Column(String(500), nullable=True)          # Foto/evidencia (Cloudinary)
