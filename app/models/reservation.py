@@ -9,10 +9,10 @@ class Reservation(Base):
 
     id = Column(Integer, primary_key=True, index=True, autoincrement=True)
     unique_id = Column(String(50), nullable=False, unique=True, index=True, default=lambda: str(uuid.uuid4())[:12].upper())
-    user_id = Column(Integer, ForeignKey("users.id", ondelete="NO ACTION"), nullable=False)
-    room_id = Column(Integer, ForeignKey("rooms.id", ondelete="NO ACTION"), nullable=False)
-    check_in = Column(Date, nullable=False)
-    check_out = Column(Date, nullable=False)
+    user_id = Column(Integer, ForeignKey("users.id", ondelete="NO ACTION"), nullable=False, index=True)
+    room_id = Column(Integer, ForeignKey("rooms.id", ondelete="NO ACTION"), nullable=False, index=True)
+    check_in = Column(Date, nullable=False, index=True)
+    check_out = Column(Date, nullable=False, index=True)
     guests = Column(Integer, nullable=False)
     
     subtotal = Column(Numeric(10, 2), nullable=True)

@@ -307,6 +307,10 @@ def list_all_reservations(
     room_id: int | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    search: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    start_date: str | None = Query(default=None),
+    end_date: str | None = Query(default=None),
 ):
     query = db.query(Reservation).options(
         selectinload(Reservation.room),
@@ -318,6 +322,30 @@ def list_all_reservations(
     
     if room_id:
         query = query.filter(Reservation.room_id == room_id)
+    if status:
+        query = query.filter(Reservation.status == status)
+    if start_date:
+        try:
+            sd = datetime.strptime(start_date, "%Y-%m-%d").date()
+            query = query.filter(Reservation.check_out >= sd)
+        except ValueError:
+            pass
+    if end_date:
+        try:
+            ed = datetime.strptime(end_date, "%Y-%m-%d").date()
+            query = query.filter(Reservation.check_in <= ed)
+        except ValueError:
+            pass
+    if search:
+        search_filter = f"%{search}%"
+        from app.models.user import UserProfile
+        query = query.join(User, User.id == Reservation.user_id).outerjoin(UserProfile, UserProfile.user_id == User.id).filter(
+            (Reservation.unique_id.ilike(search_filter)) |
+            (UserProfile.first_name.ilike(search_filter)) |
+            (UserProfile.last_name.ilike(search_filter)) |
+            (UserProfile.business_name.ilike(search_filter)) |
+            (User.email.ilike(search_filter))
+        )
         
     reservations = (
         query.order_by(Reservation.created_at.desc())
@@ -730,6 +758,7 @@ def list_all_payments(
     status: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    search: str | None = Query(default=None),
 ):
     query = db.query(Payment).options(
         selectinload(Payment.reservation).options(
@@ -747,6 +776,20 @@ def list_all_payments(
         query = query.filter(Payment.method == method)
     if status:
         query = query.filter(Payment.status == status)
+    if search:
+        search_filter = f"%{search}%"
+        from app.models.user import UserProfile
+        from sqlalchemy import or_
+        or_conditions = [
+            Reservation.unique_id.ilike(search_filter),
+            User.email.ilike(search_filter),
+            UserProfile.first_name.ilike(search_filter),
+            UserProfile.last_name.ilike(search_filter),
+            UserProfile.business_name.ilike(search_filter)
+        ]
+        if search.isdigit():
+            or_conditions.append(Payment.id == int(search))
+        query = query.join(Reservation, Reservation.id == Payment.reservation_id).outerjoin(User, User.id == Reservation.user_id).outerjoin(UserProfile, UserProfile.user_id == User.id).filter(or_(*or_conditions))
         
     total = query.count()
     payments = query.order_by(Payment.created_at.desc()).offset(offset).limit(limit).all()
@@ -755,6 +798,146 @@ def list_all_payments(
         "limit": limit,
         "offset": offset,
         "items": payments
+    }
+
+
+@router.get("/payments/stats", dependencies=[Depends(require_permission("payments", "read"))])
+def get_payments_stats(
+    db: Session = Depends(get_db),
+    start_date: datetime | None = Query(default=None),
+    end_date: datetime | None = Query(default=None),
+    method: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    search: str | None = Query(default=None),
+):
+    """Calcula estadísticas agregadas para pagos (alojamiento, incidentales, IVA, turismo, reembolsos) de forma global."""
+    query = db.query(Payment).options(
+        selectinload(Payment.reservation).options(
+            selectinload(Reservation.user).selectinload(User.profile),
+            selectinload(Reservation.room),
+            selectinload(Reservation.incidental_charges)
+        )
+    ).filter(Payment.status == "completed")
+    
+    if start_date:
+        query = query.filter(Payment.created_at >= start_date)
+    if end_date:
+        query = query.filter(Payment.created_at <= end_date)
+    if method:
+        query = query.filter(Payment.method == method)
+    if search:
+        search_filter = f"%{search}%"
+        from app.models.user import UserProfile
+        from sqlalchemy import or_
+        or_conditions = [
+            Reservation.unique_id.ilike(search_filter),
+            User.email.ilike(search_filter),
+            UserProfile.first_name.ilike(search_filter),
+            UserProfile.last_name.ilike(search_filter),
+            UserProfile.business_name.ilike(search_filter)
+        ]
+        if search.isdigit():
+            or_conditions.append(Payment.id == int(search))
+        query = query.join(Reservation, Reservation.id == Payment.reservation_id).outerjoin(User, User.id == Reservation.user_id).outerjoin(UserProfile, UserProfile.user_id == User.id).filter(or_(*or_conditions))
+        
+    completed_payments = query.all()
+    
+    from app.services.system_settings_service import get_tax_iva, get_tax_tourism
+    iva_rate = float(get_tax_iva(db))
+    tourism_rate = float(get_tax_tourism(db))
+    
+    positive_payments = [p for p in completed_payments if p.amount > 0]
+    refund_payments = [p for p in completed_payments if p.amount < 0]
+    
+    total_received = sum(float(p.amount) for p in positive_payments)
+    total_refunded = sum(abs(float(p.amount)) for p in refund_payments)
+    count = len(completed_payments)
+    refund_count = len(refund_payments)
+    
+    room_base_sum = 0.0
+    extras_base_sum = 0.0
+    incidentals_base_sum = 0.0
+    iva_sum = 0.0
+    tourism_sum = 0.0
+    
+    for p in positive_payments:
+        data = p.receipt_data
+        amount = float(p.amount)
+        
+        if data and "items" in data and len(data["items"]) > 0:
+            for item in data["items"]:
+                total_amount = float(item.get("total_amount", 0))
+                tax = float(item.get("tax", 0))
+                tourism = float(item.get("tourism", 0))
+                
+                if item.get("type") == "room":
+                    room_base_sum += total_amount
+                elif item.get("type") == "extra":
+                    extras_base_sum += total_amount
+                elif item.get("type") == "incidental":
+                    incidentals_base_sum += total_amount
+                iva_sum += tax
+                tourism_sum += tourism
+        elif p.reservation:
+            res = p.reservation
+            room_tax_factor = 1.0 + iva_rate + tourism_rate
+            
+            room_base = float(res.subtotal) if res.subtotal is not None else float(res.total_cost) / room_tax_factor
+            room_iva = float(res.tax_iva) if res.tax_iva is not None else room_base * iva_rate
+            room_tourism = float(res.tax_tourism) if res.tax_tourism is not None else room_base * tourism_rate
+            room_total = room_base + room_iva + room_tourism
+            
+            extras_base = float(res.extras_total or 0)
+            extras_iva = extras_base * iva_rate
+            extras_total = extras_base + extras_iva
+            
+            inc_base = float(res.incidentals_total or 0)
+            inc_iva = 0.0
+            if res.incidental_charges:
+                for ch in res.incidental_charges:
+                    if ch.payment_status != 'waived' and ch.apply_tax:
+                        inc_iva += float(ch.total_amount or 0) * iva_rate
+            inc_total = inc_base + inc_iva
+            
+            grand_total = room_total + extras_total + inc_total
+            if grand_total <= 0:
+                grand_total = 1.0
+                
+            prop_room = room_base / grand_total
+            prop_extra = extras_base / grand_total
+            prop_inc = inc_base / grand_total
+            prop_iva = (room_iva + extras_iva + inc_iva) / grand_total
+            prop_tourism = room_tourism / grand_total
+            
+            room_base_sum += amount * prop_room
+            extras_base_sum += amount * prop_extra
+            incidentals_base_sum += amount * prop_inc
+            iva_sum += amount * prop_iva
+            tourism_sum += amount * prop_tourism
+        else:
+            base = amount / (1.0 + iva_rate + tourism_rate)
+            iva = base * iva_rate
+            tourism = base * tourism_rate
+            
+            room_base_sum += base
+            iva_sum += iva
+            tourism_sum += tourism
+            
+    by_method = {}
+    for p in positive_payments:
+        by_method[p.method] = by_method.get(p.method, 0.0) + float(p.amount)
+        
+    return {
+        "totalReceived": total_received,
+        "totalRefunded": total_refunded,
+        "count": count,
+        "refundCount": refund_count,
+        "roomBaseSum": room_base_sum,
+        "extrasBaseSum": extras_base_sum,
+        "incidentalsBaseSum": incidentals_base_sum,
+        "ivaSum": iva_sum,
+        "tourismSum": tourism_sum,
+        "byMethod": by_method
     }
 
 @router.get("/payments/{payment_id}", response_model=PaymentRead, dependencies=[Depends(require_permission("payments", "read"))])
@@ -1338,13 +1521,26 @@ def list_clients(
     db: Session = Depends(get_db),
     limit: int = Query(default=50, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
+    search: Optional[str] = Query(default=None),
 ):
     # Filtrar solo usuarios con el rol "cliente"
+    from app.models.user import UserProfile
+    query_obj = db.query(User).join(User.roles).filter(User.is_active == True, Role.name == "cliente")
+    
+    if search:
+        search_filter = f"%{search}%"
+        query_obj = query_obj.join(User.profile).filter(
+            (User.email.ilike(search_filter)) |
+            (UserProfile.first_name.ilike(search_filter)) |
+            (UserProfile.last_name.ilike(search_filter)) |
+            (UserProfile.document_number.ilike(search_filter)) |
+            (UserProfile.nit.ilike(search_filter)) |
+            (UserProfile.nrc.ilike(search_filter)) |
+            (UserProfile.business_name.ilike(search_filter))
+        )
+
     clients = (
-        db.query(User)
-        .join(User.roles)
-        .options(selectinload(User.roles), selectinload(User.profile))
-        .filter(User.is_active == True, Role.name == "cliente")
+        query_obj.options(selectinload(User.roles), selectinload(User.profile))
         .order_by(User.id.asc())
         .offset(offset)
         .limit(limit)
@@ -1699,8 +1895,9 @@ def list_audit_logs(
     user_id: int | None = Query(default=None),
     limit: int = Query(default=100, le=500, ge=1),
     offset: int = Query(default=0, ge=0),
+    search: Optional[str] = Query(default=None),
 ):
-    q = db.query(AuditLog).order_by(AuditLog.created_at.desc())
+    q = db.query(AuditLog)
     if event_type:
         q = q.filter(AuditLog.event_type == event_type)
     if method:
@@ -1710,7 +1907,21 @@ def list_audit_logs(
             q = q.filter(AuditLog.method == method.upper())
     if user_id is not None:
         q = q.filter(AuditLog.user_id == user_id)
-    return q.offset(offset).limit(limit).all()
+        
+    if search:
+        search_filter = f"%{search}%"
+        or_conditions = [
+            AuditLog.resource.ilike(search_filter),
+            AuditLog.action.ilike(search_filter),
+            AuditLog.path.ilike(search_filter),
+            AuditLog.metadata_json.ilike(search_filter)
+        ]
+        if search.isdigit():
+            or_conditions.append(AuditLog.user_id == int(search))
+        from sqlalchemy import or_
+        q = q.filter(or_(*or_conditions))
+        
+    return q.order_by(AuditLog.created_at.desc()).offset(offset).limit(limit).all()
 
 
 # ────────────────────────────────────────────────────────────────
@@ -2063,13 +2274,80 @@ def delete_admin_incidental_category(
                metadata={"category_id": category_id})
 
 @router.get("/incidentals", response_model=list[IncidentalChargeRead], dependencies=[Depends(require_permission("incidentals", "read"))])
-def get_all_incidental_charges(db: Session = Depends(get_db)):
+def get_all_incidental_charges(
+    db: Session = Depends(get_db),
+    limit: int = Query(default=50, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    search: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    category_id: int | None = Query(default=None),
+):
     """Lista todos los cargos incidentales registrados en el sistema, ordenados por más recientes."""
-    return db.query(IncidentalCharge).options(
+    q = db.query(IncidentalCharge).options(
         selectinload(IncidentalCharge.created_by),
         selectinload(IncidentalCharge.category),
         selectinload(IncidentalCharge.reservation)
-    ).order_by(IncidentalCharge.created_at.desc()).all()
+    )
+    if status:
+        q = q.filter(IncidentalCharge.payment_status == status)
+    if category_id is not None:
+        q = q.filter(IncidentalCharge.category_id == category_id)
+    if search:
+        search_filter = f"%{search}%"
+        q = q.join(Reservation, Reservation.id == IncidentalCharge.reservation_id).outerjoin(User, User.id == IncidentalCharge.created_by_user_id).filter(
+            (IncidentalCharge.description.ilike(search_filter)) |
+            (Reservation.unique_id.ilike(search_filter)) |
+            (User.email.ilike(search_filter))
+        )
+    return q.order_by(IncidentalCharge.created_at.desc()).offset(offset).limit(limit).all()
+
+
+@router.get("/incidentals/stats", dependencies=[Depends(require_permission("incidentals", "read"))])
+def get_incidentals_stats(
+    db: Session = Depends(get_db),
+    search: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    category_id: int | None = Query(default=None),
+):
+    """Obtiene estadísticas agregadas (pendiente, pagado, condonado) para cargos incidentales basados en los filtros activos."""
+    q = db.query(IncidentalCharge).join(Reservation, Reservation.id == IncidentalCharge.reservation_id).filter(Reservation.is_deleted == False)
+    
+    if status:
+        q = q.filter(IncidentalCharge.payment_status == status)
+    if category_id is not None:
+        q = q.filter(IncidentalCharge.category_id == category_id)
+    if search:
+        search_filter = f"%{search}%"
+        q = q.outerjoin(User, User.id == IncidentalCharge.created_by_user_id).filter(
+            (IncidentalCharge.description.ilike(search_filter)) |
+            (Reservation.unique_id.ilike(search_filter)) |
+            (User.email.ilike(search_filter))
+        )
+        
+    all_filtered = q.all()
+    
+    from app.services.system_settings_service import get_tax_iva
+    iva_rate = float(get_tax_iva(db))
+    
+    pending_sum = 0.0
+    paid_sum = 0.0
+    waived_count = 0
+    
+    for c in all_filtered:
+        factor = (1.0 + iva_rate) if c.apply_tax else 1.0
+        tot = float(c.total_amount) * factor
+        if c.payment_status == 'pending':
+            pending_sum += tot
+        elif c.payment_status == 'paid':
+            paid_sum += tot
+        elif c.payment_status == 'waived':
+            waived_count += 1
+            
+    return {
+        "pending_sum": pending_sum,
+        "paid_sum": paid_sum,
+        "waived_count": waived_count
+    }
 
 @router.get("/reservations/{res_id}/incidentals", response_model=list[IncidentalChargeRead], dependencies=[Depends(require_permission("incidentals", "read"))])
 def get_reservation_incidental_charges(res_id: int, db: Session = Depends(get_db)):
