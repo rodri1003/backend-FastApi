@@ -116,6 +116,37 @@ def row_exists(connection, table, cols, vals):
         ).first()
         return res is not None
         
+    elif table == "casbin_rule":
+        ptype_idx = cols.index("ptype") if "ptype" in cols else -1
+        v0_idx = cols.index("v0") if "v0" in cols else -1
+        v1_idx = cols.index("v1") if "v1" in cols else -1
+        v2_idx = cols.index("v2") if "v2" in cols else -1
+        v3_idx = cols.index("v3") if "v3" in cols else -1
+        v4_idx = cols.index("v4") if "v4" in cols else -1
+        v5_idx = cols.index("v5") if "v5" in cols else -1
+
+        ptype = clean_val(vals[ptype_idx]) if ptype_idx != -1 else None
+        v0 = clean_val(vals[v0_idx]) if v0_idx != -1 else None
+        v1 = clean_val(vals[v1_idx]) if v1_idx != -1 else None
+        v2 = clean_val(vals[v2_idx]) if v2_idx != -1 else None
+        v3 = clean_val(vals[v3_idx]) if v3_idx != -1 else None
+        v4 = clean_val(vals[v4_idx]) if v4_idx != -1 else None
+        v5 = clean_val(vals[v5_idx]) if v5_idx != -1 else None
+
+        query_parts = []
+        params = {}
+        for col, val in [("ptype", ptype), ("v0", v0), ("v1", v1), ("v2", v2), ("v3", v3), ("v4", v4), ("v5", v5)]:
+            if col in cols:
+                if val is None:
+                    query_parts.append(f"[{col}] IS NULL")
+                else:
+                    query_parts.append(f"[{col}] = :{col}")
+                    params[col] = val
+
+        query_str = "SELECT 1 FROM [casbin_rule] WHERE " + " AND ".join(query_parts)
+        res = connection.execute(text(query_str), params).first()
+        return res is not None
+
     else:
         if "id" in cols:
             id_idx = cols.index("id")
